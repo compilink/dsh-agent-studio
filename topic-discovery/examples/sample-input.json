@@ -1,0 +1,20 @@
+[
+  {
+    "id": "published",
+    "source": "fixture",
+    "url": "https://example.invalid/lantern/announcement",
+    "title": "Lantern 新增静音计时器",
+    "created_at": "2024-04-15T09:00:00Z",
+    "published_at": "2024-06-09T10:00:00Z",
+    "text": "自编示例。Lantern 增加了可静音的计时器。"
+  },
+  {
+    "id": "unknown-publication",
+    "source": "fixture",
+    "url": "https://example.invalid/lantern/draft",
+    "title": "Lantern 便签草稿",
+    "created_at": "2024-06-09T11:00:00Z",
+    "published_at": null,
+    "text": "自编示例。草稿记录了一个新的便签构想，发布时间待定。"
+  }
+]

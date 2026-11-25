@@ -1,0 +1,12 @@
+/data/
+/evidence/
+/evaluation/private/
+/evaluation/*.json
+!/evaluation/frozen-cases-v1.json
+!/evaluation/manifest.json
+__pycache__/
+*.pyc
+*.sqlite*
+*.db
+.env
+.env.*

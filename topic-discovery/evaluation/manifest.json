@@ -1,0 +1,7 @@
+{
+  "file": "frozen-cases-v1.json",
+  "sha256": "8614c5400bb013b321f69bc7a8d04e6f55e9c13bf884bb371ed810855a0661e4",
+  "case_count": 17,
+  "protocol_scenario_count": 11,
+  "note": "Freeze v1. Changes require new version; these are synthetic fixtures, not real news."
+}

@@ -1,0 +1,13 @@
+import {readFile,writeFile} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
+import {runLocalAgent} from './local-agent.mjs';
+const task=JSON.parse(await readFile(process.argv[2],'utf8')),candidateRun=JSON.parse(await readFile(process.argv[3],'utf8')),model=process.argv[4],out=process.argv[5];
+const answer=JSON.parse(candidateRun.result),card=answer.candidates[0];
+const fields=['title','hook','retention','next_action','verification_plan'];
+const claims=[...fields.map(k=>({id:k,text:card[k]})),...card.source_claims.map((c,i)=>({id:'claim_'+i,text:c.claim})),{id:'audience_question',text:card.audience_question.question}];
+const row={type:'object',required:['id','verdict','reason'],properties:{id:{enum:claims.map(c=>c.id)},verdict:{enum:['supported','unsupported','proposal_not_fact']},reason:{type:'string'}}};
+const schema={type:'object',required:['checks'],properties:{checks:{type:'array',minItems:claims.length,maxItems:claims.length,items:row}}};
+const r=await runLocalAgent({model,system:'You are a separate evidence checker, not the editor. Critically assess each field. Supported means ALL factual implications are supported. proposal_not_fact is only a clearly hypothetical future task with no invented prerequisites, logs or completed actions. Reject new/first support from a narrow optimization; reject post-release still claims if user issue predates release. A later source cannot rewrite what the earlier user asked. If log section empty, no user logs exist. Exact quotation does not establish the broader claim. Version display name and URL tag can differ, do not invent certainty. Output concise Chinese reasons. Never modify or approve a candidate.',prompt:{evidence:task.evidence.map(e=>({id:e.artifact_id,source:e.data.source,title:e.data.title,url:e.data.url,published_at:e.data.published_at,updated_at:e.data.updated_at,text:e.data.text.replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').slice(0,4500)})),claims},schema,maxTokens:2800});
+const parsed=JSON.parse(r.result);const ids=new Set(parsed.checks.map(x=>x.id));if(ids.size!==claims.length)throw Error('Missing/duplicate checks');
+await writeFile(out,JSON.stringify({...r,source_run_id:task.run_id,reviewed_dsh_run_id:candidateRun.dsh_run_id,candidate_sha256:createHash('sha256').update(candidateRun.result).digest('hex'),review_kind:'model_critic_not_human',checks:parsed.checks,decision:parsed.checks.some(c=>c.verdict==='unsupported')?'reject':'needs_independent_review',approval:false},null,2));
+console.log(JSON.stringify({model,unsupported:parsed.checks.filter(c=>c.verdict==='unsupported').length,total:claims.length,output:out}));

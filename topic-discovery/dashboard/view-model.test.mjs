@@ -1,0 +1,10 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {count,qualityText,safeUrl,eventsUnique} from './view-model.mjs';
+test('unknown count is not zero',()=>{assert.equal(count(null),'未知');assert.equal(count(0),'0');assert.equal(count(NaN),'未知')});
+test('quality denominators and pending semantics',()=>{assert.equal(qualityText({status:'pending',numerator:2,denominator:2}),'待评估');assert.match(qualityText({denominator:0,numerator:0}),/无法计算/);assert.match(qualityText({numerator:16,denominator:20}),/80.0%/);assert.equal(qualityText({}),'待评估')});
+test('reject javascript and credential urls',()=>{assert.equal(safeUrl('javascript:alert(1)'),null);assert.equal(safeUrl('https://u:pass@example.com'),null);assert.equal(safeUrl('https://example.com'),'https://example.com/')});
+test('events deduplicate and order by durable sequence',()=>{assert.deepEqual(eventsUnique([{event_id:'b',sequence:2},{event_id:'a',sequence:1},{event_id:'b',sequence:2}]).map(e=>e.event_id),['b','a'])});
+import {qualityView} from './view-model.mjs';
+test('extraction and evidence quality have distinct definitions',()=>{assert.match(qualityView({name:'extraction_coverage'}).meaning,/不证明其内容真实/);assert.match(qualityView({name:'evidence_support_rate'}).meaning,/不代表已完成外部独立核实/)});
+test('missing human count does not imply review',()=>{assert.match(qualityView({method:'human',sample_size:2}).review,/数量未知/);assert.match(qualityView({human_reviewed_count:0}).review,/尚未人工复核/);assert.match(qualityView({human_reviewed_count:3}).review,/仅代表对应样本/)});
+test('quality metadata preserves unknown numerator and denominator',()=>{const q=qualityView({status:'unknown',method:'model',numerator:null,denominator:10,sample_size:4});assert.equal(q.value,'未知');assert.equal(q.fraction,'分子 未知 / 分母 10');assert.equal(q.sample,'样本 4 · 未知项 未知');assert.equal(q.method,'模型评估')});
+test('Chinese gold evaluation labels do not imply human gold',()=>{const q=qualityView({name:'金标主张核查准确率',method:'independent_agent_gold_not_human',human_reviewed_count:0});assert.match(q.method,/非人工/);assert.match(q.meaning,/不是人工金标/);assert.match(qualityView({name:'主张抽取覆盖率'}).meaning,/不证明其内容真实/)});

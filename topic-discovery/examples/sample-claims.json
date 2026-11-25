@@ -1,0 +1,36 @@
+{
+  "version": "synthetic-v1",
+  "real_source_case_count": 0,
+  "cases": [
+    {
+      "id": "timer",
+      "expected": "supported",
+      "source": "自编示例。此计时器支持静音。",
+      "claim": "计时器提供静音选项。",
+      "evidence": [
+        {
+          "id": "announcement",
+          "text": "自编示例。此计时器支持静音。"
+        }
+      ],
+      "bound_ids": [
+        "announcement"
+      ]
+    },
+    {
+      "id": "storage",
+      "expected": "unsupported",
+      "source": "自编示例。便签仅保存在本机。",
+      "claim": "便签会自动同步到其他设备。",
+      "evidence": [
+        {
+          "id": "note",
+          "text": "自编示例。便签仅保存在本机。"
+        }
+      ],
+      "bound_ids": [
+        "note"
+      ]
+    }
+  ]
+}

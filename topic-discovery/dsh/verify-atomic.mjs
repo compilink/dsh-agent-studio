@@ -1,0 +1,11 @@
+import {readFile,writeFile} from 'node:fs/promises';
+import {runLocalAgent} from './local-agent.mjs';
+const task=JSON.parse(await readFile(process.argv[2],'utf8')),run=JSON.parse(await readFile(process.argv[3],'utf8')),model=process.argv[4],out=process.argv[5];
+const c=JSON.parse(run.result).candidates[0];
+const cases=c.source_claims.map((x,i)=>({id:'source_claim_'+i,source:x.quote,claim:x.claim}));
+if(c.audience_question)cases.push({id:'audience_attribution',source:c.audience_question.quote,claim:'原用户实际提出的问题是：'+c.audience_question.question});
+const ids=cases.map(x=>x.id);
+const row={type:'object',required:['id','verdict','reason'],properties:{id:{enum:ids},verdict:{enum:['supported','unsupported']},reason:{type:'string'}}};
+const schema={type:'object',required:['checks'],properties:{checks:{type:'array',minItems:cases.length,maxItems:cases.length,items:row}}};
+const r=await runLocalAgent({model,system:'Judge each independent claim only against its exact source excerpt. Use the ordinary meanings of words: an optimization is not first support; a complaint is not a later newly formulated question. Unsupported means any added factual scope or intent. Do not use other case context or world knowledge. Return Chinese reasons. This is an advisory checker, not permission to publish.',prompt:{cases},schema,maxTokens:1500});
+const parsed=JSON.parse(r.result);await writeFile(out,JSON.stringify({...r,source_run_id:task.run_id,reviewed_dsh_run_id:run.dsh_run_id,review_kind:'atomic_model_checker',checks:parsed.checks,decision:parsed.checks.some(x=>x.verdict==='unsupported')?'reject':'needs_independent_review',approval:false,coverage:'Only cited source claims and audience attribution; not all prose, chronology or feasibility.'},null,2));console.log(JSON.stringify({model,checks:parsed.checks}));
