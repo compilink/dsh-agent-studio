@@ -302,3 +302,38 @@ test('new work queues behind an Orchestrator or Manager that is already generati
     } finally { release(); await studio?.close(); await rm(dataDir, {recursive: true, force: true}); }
   }
 });
+
+test('two independent Manager branches aggregate and expose task-scoped history after a cold restart', {timeout:30_000}, async () => {
+  const dataDir = await mkdtemp(join(tmpdir(),'studio-split-'));
+  let studio:Studio|undefined;
+  try {
+    studio = await createStudio({dataDir});
+    const defaults = (await studio.snapshot()).templates;
+    const template = defaults.find(t => t.role === 'orchestrator')!;
+    await studio.saveTemplate({...template,systemPrompt:'',delegateIds:['manager-default']});
+    const run = await studio.createRun({mode:'hierarchical',prompt:'并行拆分：\nCheck inputs\nCheck outputs'});
+    const root = run.tasks[0]!.id;
+    await studio.saveTemplate({...template,version:template.version+1,delegateIds:[]});
+    const other = await studio.addTask(run.id,{prompt:'Independent comparator',requestId:'extra'});
+    const state = await until(studio,s => {
+      const r = runOf(s,run.id);
+      return taskDone(r,root) && taskDone(r,other.id) && quiet(r);
+    },'both branches accepted and combined');
+    const settled = runOf(state,run.id);
+    const parent = settled.tasks.find(t => t.id === root)!;
+    assert.equal(parent.childTaskIds?.length,2);
+    assert.deepEqual(settled.agents.find(a => a.id === run.orchestratorId)!.delegateIds,['manager-default']);
+    assert.match(parent.result!,/Check inputs/);
+    assert.match(parent.result!,/Check outputs/);
+    await studio.close();
+    studio = await createStudio({dataDir});
+    let page = await studio.taskHistory(run.id,root);
+    const events = [...page.events];
+    while (page.nextOffset !== undefined) { page = await studio.taskHistory(run.id,root,page.nextOffset); events.push(...page.events); }
+    assert.ok(events.some(e => e.kind === '调用 studio_split'));
+    assert.ok(events.some(e => e.kind === '调用 studio_child_result'));
+    assert.ok(events.every(e => e.taskId === root || parent.childTaskIds!.includes(e.taskId)));
+    assert.ok(!events.some(e => e.taskId === other.id));
+    await assert.rejects(studio.taskHistory('unknown-run',root),/Unknown task/);
+  } finally { await studio?.close(); await rm(dataDir,{recursive:true,force:true}); }
+});

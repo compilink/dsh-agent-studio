@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skill 库 · DSH Agent Studio</title>
+  <link rel="stylesheet" href="/styles.css"><script src="/skills.js" defer></script>
+</head>
+<body class="network-page"><main>
+  <a href="/">返回 Agent Studio</a>
+  <h1>Skill 库</h1>
+  <p>在 Agent 模板中绑定 Skill。成员先看到摘要，需要时再读取创建成员时固定的版本。</p>
+  <label for="selection">选择 Skill</label>
+  <select class="field" id="selection"><option value="">新建 Skill</option></select>
+  <label><input id="showRetired" type="checkbox"> 显示已退役</label>
+  <form id="editor">
+    <div id="revisions" hidden><label for="revision">查看版本</label><select class="field" id="revision"></select></div>
+    <label for="name">名称</label><input class="field" id="name" required maxlength="200">
+    <label for="summary">摘要</label><textarea class="field" id="summary" rows="2" required maxlength="600"></textarea>
+    <label for="body">指令正文</label><textarea class="field" id="body" rows="12" required maxlength="24000"></textarea>
+    <button class="button primary" type="submit" id="save" disabled>创建 Skill</button>
+    <button class="button secondary" type="button" id="retire" hidden>退役</button>
+  </form>
+  <p id="status" role="status"></p>
+</main></body></html>

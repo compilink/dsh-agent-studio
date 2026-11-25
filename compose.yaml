@@ -1,0 +1,88 @@
+name: agent-studio
+
+services:
+  studio:
+    image: ${STUDIO_IMAGE:-dsh-agent-studio:local}
+    pull_policy: never
+    build:
+      context: .
+      args:
+        DSH_BUILD_IMAGE: ${DSH_BUILD_IMAGE:-dsh-build:local}
+    depends_on:
+      model-source:
+        condition: service_healthy
+    command: ["--container-listener", "--port", "4317", "--data-dir", "/data", "--dsh-home", "/model-source"]
+    user: "${STUDIO_UID:-1000}:${STUDIO_GID:-1000}"
+    environment:
+      HOME: /tmp
+      STUDIO_RUNTIME_LOCK_DIR: /run/studio-lock
+      STUDIO_DSH_HOME: /model-source
+      STUDIO_MODEL_PROBE_TIMEOUT_MS: "${STUDIO_MODEL_PROBE_TIMEOUT_MS:-180000}"
+      STUDIO_DEMO: "${STUDIO_DEMO:-0}"
+      STUDIO_MODEL_SOURCE_SOCKET: /run/studio-models/reader.sock
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 45s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777
+    ports:
+      - "127.0.0.1:${STUDIO_PORT:-4317}:4317"
+    volumes:
+      - runtime-lock:/run/studio-lock
+      - type: bind
+        source: ${STUDIO_DATA_DIR:-./.studio-docker}
+        target: /data
+        bind:
+          create_host_path: false
+      - model-socket:/run/studio-models:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4317/api/health').then(async r => { if (!r.ok || !(await r.json()).ok) process.exit(1) }).catch(() => process.exit(1))"]
+      start_period: 15s
+      interval: 15s
+      timeout: 5s
+      retries: 4
+
+  model-source:
+    image: ${STUDIO_IMAGE:-dsh-agent-studio:local}
+    pull_policy: never
+    user: "${STUDIO_UID:-1000}:${STUDIO_GID:-1000}"
+    restart: unless-stopped
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    entrypoint:
+      - node
+      - --permission
+      - --allow-fs-read=/app/scripts/model-source-reader.mjs
+      - --allow-fs-read=/source/profiles/web/cordis.patch.yml
+      - --allow-fs-read=/source/cordis.patch.yml
+      - --allow-fs-read=/source/settings.yaml
+      - --allow-fs-read=/source/.credentials.yaml
+      - --allow-fs-read=/source/.env
+      - --allow-fs-read=/run/studio-models
+      - --allow-fs-write=/run/studio-models
+      - /app/scripts/model-source-reader.mjs
+    volumes:
+      - type: bind
+        source: ${STUDIO_DSH_HOME:-./.dsh-home}
+        target: /source
+        read_only: true
+        bind:
+          create_host_path: false
+      - model-socket:/run/studio-models
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('node:http').get({socketPath:'/run/studio-models/reader.sock',path:'/health'},r=>{r.resume();process.exitCode=r.statusCode===204?0:1}).on('error',()=>process.exit(1))"]
+      interval: 10s
+      start_period: 5s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  runtime-lock:
+  model-socket:

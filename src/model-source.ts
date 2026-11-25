@@ -1,8 +1,9 @@
 /** Read-only import of literal model configuration from an existing DSH home. */
-import { readFile, stat } from 'node:fs/promises';
+import { readModelFile as optionalText } from './model-files.js';
 import { join } from 'node:path';
 import { parseEnv } from 'node:util';
-import type { Context } from '@deepseek-ai/cordis';
+import { Service, type Context } from '@deepseek-ai/cordis';
+import { DSH_LAUNCH_ENVIRONMENT_KEY, launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment';
 import CredentialProvider, {parseCredentialKey} from '@deepseek-ai/dsh-credentials';
 import type {CredentialKey, CredentialRef, CredentialRecord, CredentialInfo, CredentialRecordInfo, CredentialRecordEntry, ResolvedCredential} from '@deepseek-ai/dsh-credentials';
 import * as PiAi from '@deepseek-ai/dsh-llm-pi-ai';
@@ -14,17 +15,6 @@ const JS_MARKER = '__studio_unevaluated_js__';
 function record(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label}: expected a mapping`);
   return value as Record<string, unknown>;
-}
-
-async function optionalText(path: string): Promise<string | undefined> {
-  try {
-    const info = await stat(path);
-    if (!info.isFile() || info.size > 2_097_152) throw new Error('Configuration file must be a regular file under 2 MiB');
-    return await readFile(path, 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw error;
-  }
 }
 
 /** Parses executable YAML tags as inert markers; selected model config rejects them. */
@@ -44,55 +34,65 @@ function literal(value: unknown): void {
 
 interface CredentialDocument { refs: Record<string, string>; records: Record<string, CredentialRecord> }
 
-/** A provider with no source-file write or token-refresh capability. */
+function credentialDocument(source: string | undefined): CredentialDocument {
+  if (source === undefined) return {refs: {}, records: {}};
+  const raw = record(yaml(source, 'DSH credentials'), 'DSH credentials');
+  const refs: Record<string, string> = Object.create(null);
+  const records: Record<string, CredentialRecord> = Object.create(null);
+  const refsRaw = raw.version === undefined ? raw : raw.version === 1 ? record(raw.refs ?? {}, 'DSH credential refs') : undefined;
+  if (!refsRaw) throw new Error('Unsupported DSH credentials version; update it through DSH');
+  for (const [key, value] of Object.entries(refsRaw)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof value !== 'string' || !value) throw new Error('Invalid DSH credential reference');
+    refs[key] = value;
+  }
+  if (raw.version === 1) {
+    for (const [key, value] of Object.entries(record(raw.records ?? {}, 'DSH credential records'))) {
+      parseCredentialKey(key);
+      const entry = record(value, 'DSH credential record');
+      if (entry.kind === 'grant') records[key] = {kind: 'grant', payload: entry.payload};
+      else if (entry.kind === 'api-key') {
+        if (entry.key !== undefined && (typeof entry.key !== 'string' || !entry.key)) throw new Error('Invalid DSH API key record');
+        let env: Record<string, string> | undefined;
+        if (entry.env !== undefined) {
+          env = Object.create(null) as Record<string, string>;
+          for (const [name, item] of Object.entries(record(entry.env, 'DSH credential environment'))) {
+            if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || typeof item !== 'string') throw new Error('Invalid DSH credential environment');
+            env[name] = item;
+          }
+        }
+        records[key] = {kind: 'api-key', ...(entry.key ? {key: entry.key as string} : {}), ...(env ? {env} : {})};
+      } else throw new Error('Unsupported DSH credential record');
+    }
+  }
+  return {refs, records};
+}
+
+/** All credential lookups resolve within the provider generation that owns the endpoint. */
 export class ReadonlyDshCredentials extends CredentialProvider {
   private readonly home: string;
+  private processValues: ReturnType<typeof launchEnvironmentOf> | undefined;
+  private envFile: Record<string, string | undefined> = {};
+  private credentials: CredentialDocument = {refs:{},records:{}};
   constructor(ctx: Context, config: {home: string}) { super(ctx); this.home = config.home; }
-  private async document(): Promise<CredentialDocument> {
-    const source = await optionalText(join(this.home, '.credentials.yaml'));
-    if (source === undefined) return {refs: {}, records: {}};
-    const raw = record(yaml(source, 'DSH credentials'), 'DSH credentials');
-    const refs: Record<string, string> = {};
-    const records: Record<string, CredentialRecord> = {};
-    const refsRaw = raw.version === undefined ? raw : raw.version === 1 ? record(raw.refs ?? {}, 'DSH credential refs') : undefined;
-    if (!refsRaw) throw new Error('Unsupported DSH credentials version; update it through DSH');
-    for (const [key, value] of Object.entries(refsRaw)) {
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof value !== 'string' || !value) throw new Error('Invalid DSH credential reference');
-      refs[key] = value;
-    }
-    if (raw.version === 1) {
-      for (const [key, value] of Object.entries(record(raw.records ?? {}, 'DSH credential records'))) {
-        parseCredentialKey(key);
-        const entry = record(value, 'DSH credential record');
-        if (entry.kind === 'grant') records[key] = {kind: 'grant', payload: entry.payload};
-        else if (entry.kind === 'api-key') {
-          if (entry.key !== undefined && (typeof entry.key !== 'string' || !entry.key)) throw new Error('Invalid DSH API key record');
-          let env: Record<string, string> | undefined;
-          if (entry.env !== undefined) {
-            env = {};
-            for (const [name, item] of Object.entries(record(entry.env, 'DSH credential environment'))) {
-              if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || typeof item !== 'string') throw new Error('Invalid DSH credential environment');
-              env[name] = item;
-            }
-          }
-          records[key] = {kind: 'api-key', ...(entry.key ? {key: entry.key as string} : {}), ...(env ? {env} : {})};
-        } else throw new Error('Unsupported DSH credential record');
-      }
-    }
-    return {refs, records};
+  async* [Service.init](): AsyncGenerator<() => void, void, void> {
+    this.processValues = launchEnvironmentOf(this.ctx);
+    const [file, env] = await Promise.all([optionalText(join(this.home, '.credentials.yaml')), optionalText(join(this.home, '.env'))]);
+    this.credentials = credentialDocument(file);
+    this.envFile = env === undefined ? {} : parseEnv(env);
+    yield () => { this.credentials = {refs:{},records:{}}; this.envFile = {}; this.processValues = undefined; };
   }
   override async resolve(ref: CredentialRef): Promise<ResolvedCredential | undefined> {
-    if (process.env[ref]) return {value: process.env[ref]!, source: 'env'};
-    const value = (await this.document()).refs[ref];
+    const ambient = this.processValues?.get(ref)?.value;
+    if (ambient) return {value: ambient, source: 'env'};
+    const value = Object.hasOwn(this.credentials.refs, ref) ? this.credentials.refs[ref] : undefined;
     if (value) return {value, source: 'dsh-readonly'};
-    const envSource = await optionalText(join(this.home, '.env'));
-    const envValue = envSource === undefined ? undefined : parseEnv(envSource)[ref];
+    const envValue = Object.hasOwn(this.envFile, ref) ? this.envFile[ref] : undefined;
     return envValue ? {value: envValue, source: 'dsh-env-readonly'} : undefined;
   }
   override async describe(ref: CredentialRef): Promise<CredentialInfo> { const found = await this.resolve(ref); return {configured: !!found, writable: false, ...(found ? {source: found.source} : {})}; }
-  override async readRecord(key: CredentialKey): Promise<CredentialRecord | undefined> { return (await this.document()).records[key]; }
+  override async readRecord(key: CredentialKey): Promise<CredentialRecord | undefined> { return structuredClone(this.credentials.records[key]); }
   override async describeRecord(key: CredentialKey): Promise<CredentialRecordInfo> { const value = await this.readRecord(key); return {configured: !!value, writable: false, ...(value ? {kind: value.kind} : {})}; }
-  override async listRecords(): Promise<readonly CredentialRecordEntry[]> { return Object.entries((await this.document()).records).map(([key, value]) => ({key: parseCredentialKey(key), kind: value.kind})); }
+  override async listRecords(): Promise<readonly CredentialRecordEntry[]> { return Object.entries(this.credentials.records).map(([key, value]) => ({key: parseCredentialKey(key), kind: value.kind})); }
   override async set(_ref: CredentialRef, _value: string): Promise<void> { throw new Error('DSH credentials are read-only in Agent Studio'); }
   override async unset(_ref: CredentialRef): Promise<void> { throw new Error('DSH credentials are read-only in Agent Studio'); }
   override async deleteRecord(_key: CredentialKey): Promise<void> { throw new Error('DSH credentials are read-only in Agent Studio'); }
@@ -103,6 +103,7 @@ export class ReadonlyDshCredentials extends CredentialProvider {
 
 /** Loads only llm-* configuration; unrelated plugin entries are never executed. */
 export async function mountConfiguredModels(ctx: Context, home: string): Promise<void> {
+  if (!ctx.get(DSH_LAUNCH_ENVIRONMENT_KEY)) ctx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, launchEnvironmentOf(ctx));
   const profile = process.env.STUDIO_DSH_PROFILE ?? 'web';
   if (!/^[a-zA-Z0-9_-]+$/.test(profile)) throw new Error('STUDIO_DSH_PROFILE must be a profile name');
   const configs = new Map<string, Record<string, unknown>>();
@@ -128,8 +129,14 @@ export async function mountConfiguredModels(ctx: Context, home: string): Promise
   const settings = settingsSource === undefined ? {} : record(yaml(settingsSource, 'DSH settings'), 'DSH settings');
   literal(settings['llm-pi-ai']);
   literal(settings['llm-deepseek']);
-  // settings-file resolves its own namespace-over-base semantics without any write call.
-  await ctx.plugin(FileSettings, {dshHome: home, watch: false});
+  // Keep DSH's namespace merging and validation while reading from the same source as the profile.
+  class ModelSettings extends FileSettings {
+    override get writable() { return false; }
+    protected override async load() { return settings; }
+    protected override async persist(): Promise<void> { throw new Error('Model settings are read-only'); }
+    override async prepareDocument(): Promise<string> { throw new Error('Model settings are read-only'); }
+  }
+  await ctx.plugin(ModelSettings, {dshHome: home, watch: false});
   await ctx.plugin(ReadonlyDshCredentials, {home});
   const overrides = process.env.STUDIO_ENDPOINT_OVERRIDES;
   if (overrides) {

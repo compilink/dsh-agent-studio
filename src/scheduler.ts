@@ -31,6 +31,7 @@ export class DurableScheduler {
     for (const attempt of this.store.attempts()) if (attempt.status === 'running') workers.add(attempt.workerId);
     for (const delivery of this.store.deliveries()) {
       if (!['pending','running'].includes(delivery.state)) continue;
+      if (delivery.state === 'pending' && delivery.taskId && this.store.task(delivery.taskId)?.pauseOwners?.length) continue;
       if (seen.has(delivery.agentId)) continue;
       seen.add(delivery.agentId);
       if (delivery.state !== 'pending' || this.active.has(delivery.agentId) || this.driver.isBusy(delivery.agentId) || delivery.nextAt > Date.now()) continue;

@@ -74,3 +74,40 @@ test('disabled model plugins stay disabled even when settings contain providers;
     assert.deepEqual(ctx.llm.listProviders().map(p => p.id), ['disabled-fixture']);
   } finally { await ctx.fiber.dispose(); await rm(home, {recursive: true, force: true}); }
 });
+
+test('credential references, structured records and the launch environment stay attached to the loaded provider', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'studio-source-generation-'));
+  const before = new Context();
+  const after = new Context();
+  const ambient = 'STUDIO_SOURCE_GENERATION_AMBIENT';
+  const ambientBefore = process.env[ambient];
+  const load = async (ctx: Context, value: string) => {
+    process.env[ambient] = value;
+    await writeFile(join(home,'.credentials.yaml'),JSON.stringify({version:1,refs:{STUDIO_SOURCE_GENERATION_REF:value},
+      records:{'llm-pi-ai/fixture':{kind:'api-key',key:value}}}));
+    await writeFile(join(home,'.env'),'STUDIO_SOURCE_GENERATION_FILE='+value);
+    await ctx.plugin(LlmRuntime);
+    await mountConfiguredModels(ctx,home);
+  };
+  try {
+    const first = 'fixture-1', second = 'fixture-2';
+    await load(before, first);
+    await load(after, second);
+    for (const [ctx, expected] of [[before,first],[after,second]] as const) {
+      for (const ref of [ambient,'STUDIO_SOURCE_GENERATION_REF','STUDIO_SOURCE_GENERATION_FILE']) {
+        assert.ok((await ctx.credentials.resolve(credentialRef(ref)))?.value === expected);
+      }
+      assert.ok(ctx.launchEnvironment?.get(ambient)?.value === expected);
+      const key = credentialKey('llm-pi-ai','fixture');
+      const record = await ctx.credentials.readRecord(key);
+      assert.ok(record?.kind === 'api-key' && record.key === expected);
+      assert.ok(Reflect.set(record, 'key', 'caller-copy'));
+      const next = await ctx.credentials.readRecord(key);
+      assert.ok(next?.kind === 'api-key' && next.key === expected);
+    }
+  } finally {
+    if (ambientBefore === undefined) delete process.env[ambient]; else process.env[ambient] = ambientBefore;
+    await Promise.all([before.fiber.dispose(),after.fiber.dispose()]);
+    await rm(home,{recursive:true,force:true});
+  }
+});

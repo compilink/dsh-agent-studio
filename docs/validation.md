@@ -7,7 +7,9 @@ npm run check
 npm run check:bundle
 ```
 
-`check` 校验依赖兼容性、编译 TypeScript，并运行本地测试。测试使用临时数据目录和确定性演示适配器，覆盖任务追加与幂等、并发与恢复、模板快照、记忆访问范围和 HTTP 接口。容器集成用例需要显式提供镜像。Bundle 测试还检查插件装载、卸载和打包内容。
+`check` 校验依赖兼容性、编译 TypeScript，并运行本地测试。测试使用临时数据目录和确定性演示适配器，覆盖任务追加与幂等、暂停恢复、跨组分工、流程重跑和人工改稿交接，以及记忆、Skill 和网络访问权限。模型目录测试使用本机模拟服务验证刷新期间的模型地址和凭据归属。容器集成用例需要显式提供镜像。Bundle 测试还检查插件装载、卸载和打包内容。
+
+配置好 Playwright 和 Chromium 后，可运行 `node scripts/check-workflow-ui.mjs` 和 `node scripts/check-model-ui.mjs`，分别验证画布编辑与人工放行、模型刷新与连接测试。两者均使用临时数据。Docker 的独立验收方法见[部署指南](docker.md)。
 
 ## 使用自己的容器或模型验证
 

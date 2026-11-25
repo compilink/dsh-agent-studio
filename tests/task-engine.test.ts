@@ -176,3 +176,182 @@ test('explicit historical child reuse preserves only long-term identity in fresh
     assert.throws(()=>f.engine.delegate('third-o',{taskId:noSource.id,role:'manager',prompt:'unselected',memorySourceAgentId:oldManager.agentId}),/authorized historical child/);
   } finally {await f.close();}
 });
+
+test('a split binds permitted templates atomically and nested pause ownership survives recovery', async () => {
+  const f = await fixture();
+  try {
+    const root = f.store.agent('o')!;
+    f.store.saveAgent({...root, delegateIds:['manager']});
+    const parent = f.engine.createTask('run',{prompt:'parallel',requestId:'split'});
+    assert.throws(() => f.engine.split(root.id,parent.id,[{templateId:'manager',prompt:'valid'},{templateId:'worker',prompt:'not allowed'}]), /scope/);
+    assert.equal(f.store.tasks().length,1);
+    const children = f.engine.split(root.id,parent.id,[{templateId:'manager',prompt:'one'},{templateId:'manager',prompt:'two'}]);
+    assert.notEqual(f.store.task(children[0]!)!.coordinatorId,f.store.task(children[1]!)!.coordinatorId);
+    const sub = f.engine.split(f.store.task(children[0]!)!.coordinatorId,children[0]!,[{templateId:'worker',prompt:'nested'}])[0]!;
+    f.engine.pauseTask('run',children[0]!);
+    f.engine.pauseTask('run',parent.id);
+    assert.deepEqual(f.store.task(sub)!.pauseOwners,[children[0],parent.id]);
+    f.engine.recover();
+    f.engine.resumeTask('run',parent.id);
+    assert.equal(f.store.task(sub)!.status,'paused');
+    assert.equal(f.store.task(children[1]!)!.status,'queued');
+    f.engine.resumeTask('run',children[0]!);
+    assert.equal(f.store.task(sub)!.status,'queued');
+    f.engine.cancelTask('run',parent.id);
+    assert.ok(f.store.tasks().every(t => t.status === 'cancelled'));
+  } finally { await f.close(); }
+});
+
+test('a paused handoff finishes its active turn and resumes the original inbox delivery', async () => {
+  const f = await fixture();
+  try {
+    const prompt = 'word '.repeat(6000);
+    const task = f.engine.createTask('run',{prompt,requestId:'long'});
+    const root = f.store.deliveries()[0]!;
+    f.engine.beginDelivery(root.id);
+    assert.equal(f.engine.pauseTask('run',task.id).pauseRequested,true);
+    const delegated = f.engine.delegate('o',{taskId:task.id,role:'worker',prompt});
+    f.engine.finishDelivery(root.id);
+    assert.equal(f.store.task(task.id)!.status,'paused');
+    const worker = f.store.deliveries().find(d => d.attemptId === delegated.attemptId)!;
+    assert.equal(f.engine.beginDelivery(worker.id),undefined);
+    f.engine.resumeTask('run',task.id);
+    assert.equal(f.engine.beginDelivery(worker.id)?.text,prompt);
+    f.engine.report(delegated.agentId,{taskId:task.id,attemptId:delegated.attemptId!,text:prompt});
+    f.engine.accept('o',{taskId:task.id,text:prompt});
+    assert.equal(f.store.task(task.id)!.result,prompt);
+    f.engine.message('run',prompt,'long-message');
+    f.engine.message('run',prompt,'long-message');
+    assert.throws(() => f.engine.message('run','changed','long-message'),/conflict/);
+    assert.equal(f.store.deliveries().filter(d => d.kind === 'message').length,1);
+  } finally { await f.close(); }
+});
+
+test('a bound Worker receives the published template through an authorized Manager in hierarchical mode', async () => {
+  const f = await fixture();
+  try {
+    f.store.saveRun({...f.store.run('run')!,mode:'hierarchical'});
+    const root = f.store.agent('o')!;
+    f.store.saveAgent({...root,delegateIds:['manager']});
+    const manager = f.store.template('manager')!;
+    f.store.saveTemplate({...manager,delegateIds:['worker']});
+    const pinned = f.store.template('worker')!;
+    f.store.saveTemplate({...pinned,version:2,systemPrompt:'newer configuration'});
+    const task = f.engine.createAssignedTask('run',{prompt:'bound',requestId:'r'},pinned);
+    const worker = f.store.agent(f.store.attempt(task.latestAttemptId!)!.workerId)!;
+    assert.equal(worker.templateVersion,1);
+    assert.equal(worker.systemPrompt,pinned.systemPrompt);
+    assert.equal(f.store.agent(worker.parentId!)!.templateId,'manager');
+    assert.deepEqual(f.store.deliveries().filter(d => d.state === 'pending').map(d => d.agentId),[worker.id]);
+    assert.equal(f.engine.createAssignedTask('run',{prompt:'bound',requestId:'r'},pinned).id,task.id);
+    f.store.saveTemplate({...manager,delegateIds:[]});
+    assert.throws(() => f.engine.createAssignedTask('run',{prompt:'blocked',requestId:'z'},pinned),/No authorized Manager/);
+    assert.equal(f.store.tasks('run').length,1);
+    assert.throws(() => f.engine.createAssignedTask('run',{prompt:'bound',requestId:'r'},{...pinned,version:2}),/conflict/);
+  } finally {await f.close();}
+});
+
+test('a coordinator can return one accepted branch for revision without redoing its siblings',async () => {
+  const f = await fixture();
+  try {
+    const parent = f.engine.createTask('run',{prompt:'parent',requestId:'p'});
+    const [left,right] = f.engine.split('o',parent.id,[{templateId:'worker',prompt:'left instructions'},{templateId:'worker',prompt:'right instructions'}]);
+    const complete = (id:string,summary:string) => {
+      const attemptId = f.store.task(id)!.latestAttemptId!;
+      const attempt = f.store.attempt(attemptId)!;
+      const work = f.store.deliveries('run').find(d => d.kind === 'task' && d.attemptId === attemptId)!;
+      f.engine.beginDelivery(work.id);
+      f.engine.report(attempt.workerId,{taskId:id,attemptId,text:summary});
+      f.engine.finishDelivery(work.id);
+      const review = f.store.deliveries('run').find(d => d.kind === 'review' && d.attemptId === attemptId)!;
+      f.engine.beginDelivery(review.id);
+      f.engine.accept('o',{taskId:id,text:'Accepted '+summary});
+      f.engine.finishDelivery(review.id);
+    };
+    complete(left!,'left');
+    complete(right!,'right');
+    const review = f.store.deliveries('run').find(d => d.taskId === parent.id && d.kind === 'review')!;
+    f.engine.beginDelivery(review.id);
+    assert.throws(() => f.engine.revise('o',parent.id,'fix','unknown'), /direct child/);
+    f.engine.revise('o',parent.id,'address the gap',left);
+    assert.equal(f.store.delivery(review.id)!.state,'done');
+    const attempts = f.store.attempts(left);
+    assert.equal(attempts.length,2);
+    assert.equal(attempts[0]!.status,'reported');
+    assert.equal(attempts[0]!.workerId,attempts[1]!.workerId);
+    assert.match(f.store.deliveries('run').find(d => d.attemptId === attempts[1]!.id)!.text,/left instructions[\s\S]*left[\s\S]*address the gap/);
+    assert.equal(f.store.task(right!)!.status,'completed');
+    assert.equal(f.store.attempts(right).length,1);
+    complete(left!,'revised');
+    assert.equal(f.store.task(parent.id)!.status,'review');
+  } finally {await f.close();}
+});
+
+test('resuming a paused split reconciles a cancelled or failed branch bottom-up, including after restart', async () => {
+  for (const nested of [false,true]) {
+    const f = await fixture();
+    try {
+      const parent = f.engine.createTask('run',{prompt:'parent', requestId:'parent'});
+      const dispatch = f.store.deliveries()[0]!;
+      f.engine.beginDelivery(dispatch.id);
+      const branch = f.engine.split('o',parent.id,[{templateId:nested?'manager':'worker',prompt:'branch'}])[0]!;
+      f.engine.finishDelivery(dispatch.id);
+      let leaf = branch;
+      if (nested) {
+        const delegation = f.store.deliveries().find(d => d.taskId === branch)!;
+        f.engine.beginDelivery(delegation.id);
+        leaf = f.engine.split(delegation.agentId,branch,[{templateId:'worker',prompt:'leaf'}])[0]!;
+        f.engine.finishDelivery(delegation.id);
+      }
+      const work = f.store.deliveries().find(d => d.taskId === leaf)!;
+      if (nested) f.engine.beginDelivery(work.id);
+      f.engine.pauseTask('run',parent.id);
+      if (nested) f.engine.failDelivery(work.id,'failed during pause',1,1);
+      else f.engine.cancelTask('run',leaf);
+      assert.equal(f.store.task(parent.id)!.status,'paused');
+      // A runtime recovery while still paused must keep the explicit pause.
+      f.engine.recover();
+      assert.equal(f.store.task(parent.id)!.status,'paused');
+      const before = f.store.deliveries().length;
+      for(let i=0;i<2;i++) {
+        assert.equal(f.engine.resumeTask('run',parent.id).status,'blocked');
+        if (nested) assert.equal(f.store.task(branch)!.status,'blocked');
+      }
+      // Repair the stale waiting state written by previous releases, even without another manual resume.
+      for(const id of new Set([parent.id,...(nested ? [branch] : [])])) {
+        f.store.saveTask({...f.store.task(id)!,status:'running',error:undefined});
+      }
+      f.store.setRunStatus('run','running');
+      for(let i=0;i<2;i++) {
+        f.engine.recover();
+        assert.equal(f.store.task(parent.id)!.status,'blocked');
+        assert.equal(f.store.task(leaf)!.status,nested?'failed':'cancelled');
+        assert.equal(f.store.run('run')!.status,'blocked');
+        assert.equal(f.store.deliveries().length,before);
+        assert.ok(!f.store.deliveries().some(d => d.state === 'pending' || d.state === 'running'));
+      }
+    } finally {await f.close();}
+  }
+});
+
+test('stopped Runs reject new work but replay previously acknowledged idempotent submissions', async () => {
+  const f = await fixture();
+  try {
+    const task = f.engine.createTask('run',{prompt:'before stop',requestId:'task'});
+    f.engine.message('run','before stop','message');
+    f.engine.pauseTask('run',task.id);
+    f.engine.cancelRun('run');
+    const before = f.store.run('run')!;
+    assert.equal(f.engine.createTask('run',{prompt:task.prompt,requestId:'task'}).id,task.id);
+    f.engine.message('run','before stop','message');
+    assert.throws(() => f.engine.createTask('run',{prompt:'different',requestId:'task'}),/conflict/);
+    assert.throws(() => f.engine.message('run','different','message'),/conflict/);
+    assert.throws(() => f.engine.createTask('run',{prompt:'new',requestId:'new'}),/stopped/);
+    assert.throws(() => f.engine.message('run','new'),/stopped/);
+    assert.throws(() => f.engine.message('run','new','new'),/stopped/);
+    assert.throws(() => f.engine.retryTask('run',task.id),/stopped/);
+    assert.throws(() => f.engine.resumeTask('run',task.id),/stopped/);
+    f.engine.recover();
+    assert.deepEqual(f.store.run('run'),before);
+  } finally {await f.close();}
+});

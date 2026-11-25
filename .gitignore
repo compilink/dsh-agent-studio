@@ -40,3 +40,6 @@ drama-blobs/
 
 # Machine-specific settings and unpublished material
 .local/
+.dsh-home/
+compose.override.yml
+compose.override.yaml

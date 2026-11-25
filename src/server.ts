@@ -1,5 +1,6 @@
-/** Loopback-only Web entry point for the standalone DSH application. */
+/** Local Web entry point with an explicit container listener. */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { resolve, join } from 'node:path';
@@ -7,8 +8,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { renderVideoReviewPage } from './video-editorial-settings.js';
 import { VIDEO_ROLE_CONTRACTS, VIDEO_TOOL_CONTRACTS } from './video-role-contracts.js';
+import { workflowRoute } from './workflow-http.js';
+import { WorkflowError } from './workflow-plans.js';
+import { exportText } from './text-export.js';
+import { SearchSettingsError } from './search-settings.js';
 import { createStudio } from './runtime.js';
-import type { AgentTemplate, ExecutionMode, Studio, StudioOptions } from './types.js';
+import type { ExecutionMode, Studio, StudioOptions } from './types.js';
 
 class HttpError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -24,14 +29,21 @@ function text(value: unknown, name: string, max: number): string {
   return value;
 }
 
-async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
+const textRequestBytes = 14 * 1024 * 1024;
+
+function requiredBodyText(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !value.trim()) throw new HttpError(400, label + '不能为空');
+  return value;
+}
+
+async function body(req: IncomingMessage, limit = 131072): Promise<Record<string, unknown>> {
   if (!req.headers['content-type']?.toLowerCase().startsWith('application/json')) throw new HttpError(415, '请使用 application/json');
   let size = 0;
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
-    if (size > 131072) throw new HttpError(413, '请求过大');
+    if (size > limit) throw new HttpError(413, '请求过大');
     chunks.push(buffer);
   }
   try { return object(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
@@ -46,15 +58,24 @@ function send(res: ServerResponse, status: number, data: unknown): void {
   res.end(JSON.stringify(data));
 }
 
-function templateInput(id: string, value: Record<string, unknown>): Omit<AgentTemplate, 'version' | 'memoryIdentityId'> & {version?: number} {
+function templateInput(id: string, value: Record<string, unknown>): Parameters<Studio['saveTemplate']>[0] {
   if (value.id !== id) throw new HttpError(400, '模板 ID 不一致');
   const role = value.role;
   if (role !== 'orchestrator' && role !== 'manager' && role !== 'worker') throw new HttpError(400, 'Agent 角色无效');
+  if (value.publicNetwork !== undefined && typeof value.publicNetwork !== 'boolean') throw new HttpError(400, '公开网络授权必须是布尔值');
   const selection = object(value.selection);
+  if (typeof value.systemPrompt !== 'string') throw new HttpError(400, '职责设定必须是文本');
+  const ids = (values: unknown) => {
+    if (!Array.isArray(values) || !values.every(id => typeof id === 'string')) throw new HttpError(400, '配置引用必须是 ID 列表');
+    return values as string[];
+  };
   if (value.version !== undefined && (!Number.isSafeInteger(value.version) || Number(value.version) < 1)) throw new HttpError(400, '模板版本无效');
   return {
+    ...(value.publicNetwork === undefined ? {} : {publicNetwork: value.publicNetwork as boolean}),
     id: text(id, '模板 ID', 100), name: text(value.name, '名称', 100), role,
-    systemPrompt: text(value.systemPrompt, 'System prompt', 16000),
+    systemPrompt: value.systemPrompt,
+    ...(value.skillIds === undefined ? {} : {skillIds: ids(value.skillIds)}),
+    ...(value.delegateIds === undefined ? {} : {delegateIds: value.delegateIds === null ? null : ids(value.delegateIds)}),
     selection: {provider: text(selection.provider, 'Provider', 200), model: text(selection.model, '模型', 300),
       ...(selection.reasoningEffort !== undefined && selection.reasoningEffort !== '' ? {reasoningEffort: text(selection.reasoningEffort, '推理等级', 100)} : {})},
     ...(value.version === undefined ? {} : {version: value.version as number}),
@@ -62,9 +83,11 @@ function templateInput(id: string, value: Record<string, unknown>): Omit<AgentTe
 }
 
 /** Start a local server; a supplied Studio is useful for HTTP boundary tests. */
-export async function startServer(options: StudioOptions & {port?: number; publicDir?: string; studio?: Studio}) {
+export async function startServer(options: StudioOptions & {port?: number; containerListener?: boolean; publicDir?: string; studio?: Studio}) {
+  if (options.containerListener && !existsSync('/.dockerenv') && !existsSync('/run/.containerenv')) throw new Error('--container-listener requires a Docker or Podman container');
   const csrfToken = randomBytes(32).toString('hex');
   const clients = new Set<ServerResponse>();
+  const shutdown = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let closing = false;
   let publishing = false;
@@ -111,6 +134,28 @@ export async function startServer(options: StudioOptions & {port?: number; publi
       if (method === 'GET' && url.pathname === '/api/bootstrap') return send(res, 200, {csrfToken});
       if (method === 'GET' && url.pathname === '/api/state') return send(res, 200, await studio.snapshot());
       if (method === 'GET' && url.pathname === '/api/health') return send(res, 200, {ok: true, phase: 3, backend: 'dsh'});
+      if (method === 'GET' && url.pathname === '/api/network/calls') return send(res, 200, studio.network.recent());
+      if (url.pathname === '/api/network/settings') {
+        if (method === 'GET') return send(res, 200, studio.network.settings.view());
+        if (method === 'PUT') return send(res, 200, studio.network.settings.save(await body(req)));
+      }
+      if (method === 'GET' && url.pathname === '/api/models') return send(res, 200, (await studio.snapshot()).models);
+      if (method === 'POST' && url.pathname === '/api/models/refresh') return send(res, 200, await studio.refreshModels());
+      if (method === 'POST' && url.pathname === '/api/models/probe') {
+        const input = await body(req);
+        const selection = {
+          provider: text(input.provider, 'Provider', 200), model: text(input.model, '模型', 300),
+          ...(input.reasoningEffort === undefined ? {} : {reasoningEffort: text(input.reasoningEffort, '推理等级', 100)}),
+        };
+        const disconnected = new AbortController();
+        const cancel = () => disconnected.abort();
+        res.once('close', cancel);
+        try {
+          const result = await studio.probeModel(selection, AbortSignal.any([disconnected.signal, shutdown.signal]));
+          if (!res.destroyed) send(res, 200, result);
+          return;
+        } finally { res.off('close', cancel); }
+      }
       if (url.pathname.startsWith('/api/video')) {
         const video=studio.video;if(!video)throw new HttpError(404,'视频试点未启用：请设置 STUDIO_VIDEO_INPUT_ROOT 为专用素材目录');
         if(method==='GET'&&url.pathname==='/api/video/contracts')return send(res,200,{roles:VIDEO_ROLE_CONTRACTS,tools:VIDEO_TOOL_CONTRACTS});
@@ -148,6 +193,48 @@ export async function startServer(options: StudioOptions & {port?: number; publi
         }
         throw new HttpError(404,'未找到视频资源');
       }
+      if (url.pathname.startsWith('/api/workflows/')) {
+        if (!studio.workflows) throw new HttpError(404, '任务流程未启用');
+        const output = /^\/api\/workflows\/instances\/([a-zA-Z0-9_-]+)\/nodes\/([a-zA-Z0-9_-]+)\/rounds\/(\d+)\/export$/.exec(url.pathname);
+        if (method === 'GET' && output) {
+          const [,instanceId,nodeId,round] = output;
+          const format = url.searchParams.get('format');
+          if (format !== 'docx' && format !== 'md') throw new HttpError(400, '请选择 Word 或 Markdown');
+          const {title,content} = studio.workflows.releasedOutput(instanceId!,nodeId!,Number(round));
+          const {mime,bytes} = exportText(title,content,format);
+          res.writeHead(200, {'Content-Type':mime, 'Cache-Control':'no-store',
+            'Content-Disposition': `attachment; filename="workflow-${instanceId}-${nodeId}-r${round}.${format}"`});
+          return res.end(bytes);
+        }
+        const reply = workflowRoute(studio.workflows, method, url.pathname, method === 'GET' ? {} : await body(req, textRequestBytes));
+        return send(res, reply.status, reply.data);
+      }
+      const skill = /^\/api\/skills(?:\/([a-zA-Z0-9_-]+))?$/.exec(url.pathname);
+      if (skill) {
+        const id = skill[1];
+        if (method === 'GET') {
+          if (!id) return send(res, 200, url.searchParams.get('includeRetired') === '1' ? studio.skills.directory() : studio.skills.list());
+          const value = url.searchParams.get('version');
+          if (value !== null && (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value)))) throw new HttpError(400, '无效的 Skill 版本');
+          return send(res, 200, studio.skills.read(id, value === null ? undefined : Number(value)));
+        }
+        if (method === 'POST' && !id) return send(res, 201, studio.skills.create(await body(req)));
+        if (id && (method === 'PUT' || method === 'DELETE')) {
+          const {expectedVersion, ...fields} = await body(req);
+          return send(res, 200, studio.skills.revise(id, expectedVersion, fields, method === 'DELETE'));
+        }
+      }
+      const taskRead = /^\/api\/runs\/([a-zA-Z0-9_-]+)\/tasks\/([a-zA-Z0-9_-]+)\/(history|export)$/.exec(url.pathname);
+      if (taskRead && method === 'GET') {
+        const [,runId,taskId,kind] = taskRead;
+        if (kind === 'history') return send(res, 200, await studio.taskHistory(runId!,taskId!,Number(url.searchParams.get('offset') ?? 0)));
+        const format = url.searchParams.get('format');
+        if (format !== 'docx' && format !== 'md') throw new HttpError(400,'请选择 Word 或 Markdown');
+        const {title, content} = studio.taskOutput(runId!,taskId!);
+        const {mime,bytes} = exportText(title,content,format);
+        res.writeHead(200, {'Content-Type':mime,'Content-Disposition': `attachment; filename="task-${taskId}.${format}"`});
+        return res.end(bytes);
+      }
       const memory = /^\/api\/runs\/([a-zA-Z0-9_-]+)\/memories(?:\/([a-zA-Z0-9_-]+))?$/.exec(url.pathname);
       if (method === 'GET' && memory) {
         const offset = url.searchParams.has('offset') ? Number(url.searchParams.get('offset')) : undefined;
@@ -178,28 +265,32 @@ export async function startServer(options: StudioOptions & {port?: number; publi
       }
       const template = /^\/api\/templates\/([a-zA-Z0-9_-]+)$/.exec(url.pathname);
       if (method === 'PUT' && template) {
-        const result = await studio.saveTemplate(templateInput(template[1]!, await body(req)));
+        const result = await studio.saveTemplate(templateInput(template[1]!, await body(req, textRequestBytes)));
         schedule(); return send(res, 200, result);
       }
       if (method === 'POST' && url.pathname === '/api/runs') {
-        const value = await body(req);
+        const value = await body(req, textRequestBytes);
         if (!['auto', 'direct', 'hierarchical'].includes(String(value.mode))) throw new HttpError(400, '执行模式无效');
-        const result = await studio.createRun({prompt: text(value.prompt, '任务', 8000), mode: value.mode as ExecutionMode,
+        const result = await studio.createRun({prompt: requiredBodyText(value.prompt, '任务'), mode: value.mode as ExecutionMode,
           ...(value.orchestratorTemplateId === undefined ? {} : {orchestratorTemplateId: text(value.orchestratorTemplateId, 'Orchestrator 模板', 100)}),
           ...(value.reuseMemoryFromRunId === undefined ? {} : {reuseMemoryFromRunId: text(value.reuseMemoryFromRunId, '长期记忆来源协作', 100)})});
         schedule(); return send(res, 201, result);
       }
       const tasks = /^\/api\/runs\/([a-zA-Z0-9_-]+)\/tasks$/.exec(url.pathname);
       if (method === 'POST' && tasks) {
-        const value = await body(req);
+        const value = await body(req, textRequestBytes);
         const requestId = text(value.requestId, '提交 ID', 100);
         if (!/^[a-zA-Z0-9_-]+$/.test(requestId)) throw new HttpError(400, '提交 ID 格式无效');
-        const result = await studio.addTask(tasks[1]!, {prompt: text(value.prompt, '任务', 8000), requestId,
+        const result = await studio.addTask(tasks[1]!, {prompt: requiredBodyText(value.prompt, '任务'), requestId,
           ...(value.targetManagerId === undefined ? {} : {targetManagerId: text(value.targetManagerId, 'Manager ID', 100)})});
         schedule(); return send(res, 202, result);
       }
-      const taskAction = /^\/api\/runs\/([a-zA-Z0-9_-]+)\/tasks\/([a-zA-Z0-9_-]+)\/(retry|cancel)$/.exec(url.pathname);
+      const taskAction = /^\/api\/runs\/([a-zA-Z0-9_-]+)\/tasks\/([a-zA-Z0-9_-]+)\/(retry|cancel|pause|resume)$/.exec(url.pathname);
       if (method === 'POST' && taskAction) {
+        if (taskAction[3] === 'pause' || taskAction[3] === 'resume') {
+          const result = taskAction[3] === 'pause' ? await studio.pauseTask(taskAction[1]!, taskAction[2]!) : await studio.resumeTask(taskAction[1]!,taskAction[2]!);
+          schedule(); return send(res, 202, result);
+        }
         if (taskAction[3] === 'retry') {
           const result = await studio.retryTask(taskAction[1]!, taskAction[2]!);
           schedule(); return send(res, 202, result);
@@ -209,13 +300,24 @@ export async function startServer(options: StudioOptions & {port?: number; publi
       }
       const action = /^\/api\/runs\/([a-zA-Z0-9_-]+)\/(messages|stop)$/.exec(url.pathname);
       if (method === 'POST' && action) {
-        if (action[2] === 'messages') await studio.sendMessage(action[1]!, text((await body(req)).text, '消息', 8000));
+        if (action[2] === 'messages') {
+          const input = await body(req, textRequestBytes);
+          await studio.sendMessage(action[1]!, requiredBodyText(input.text, '消息'), input.requestId === undefined ? undefined : text(input.requestId,'提交 ID',100));
+        }
         else await studio.stopRun(action[1]!);
         schedule(); return send(res, 202, {accepted: true});
       }
       const staticFiles: Record<string, {file: string; mime: string}> = {
         '/': {file: 'index.html', mime: 'text/html; charset=utf-8'},
         '/index.html': {file: 'index.html', mime: 'text/html; charset=utf-8'},
+        '/workflows.html': {file:'workflows.html', mime:'text/html; charset=utf-8'},
+        '/workflow-inputs.js': {file:'workflow-inputs.js', mime:'text/javascript; charset=utf-8'},
+        '/workflows.js': {file:'workflows.js', mime:'text/javascript; charset=utf-8'},
+        '/workflows.css': {file:'workflows.css', mime:'text/css; charset=utf-8'},
+        '/skills.html': {file:'skills.html', mime:'text/html; charset=utf-8'},
+        '/skills.js': {file:'skills.js', mime:'text/javascript; charset=utf-8'},
+        '/network.html': {file: 'network.html', mime: 'text/html; charset=utf-8'},
+        '/network.js': {file: 'network.js', mime: 'text/javascript; charset=utf-8'},
         '/video.html': {file: 'video.html', mime: 'text/html; charset=utf-8'},
         '/video.js': {file: 'video.js', mime: 'text/javascript; charset=utf-8'},
         '/app.js': {file: 'app.js', mime: 'text/javascript; charset=utf-8'},
@@ -232,14 +334,14 @@ export async function startServer(options: StudioOptions & {port?: number; publi
     })().catch((error: unknown) => {
       if (res.headersSent) { res.end(); return; }
       const message = error instanceof Error ? error.message : '请求失败';
-      const status = error instanceof HttpError ? error.status : /not found|不存在|unknown run|unknown task/i.test(message) ? 404 : 400;
+      const status = error instanceof HttpError || error instanceof WorkflowError || error instanceof SearchSettingsError ? error.status : /version conflict/i.test(message) ? 409 : /not found|不存在|unknown run|unknown task|unknown skill/i.test(message) ? 404 : 400;
       send(res, status, {error: message.slice(0, 600)});
     });
   });
   const heartbeat = setInterval(() => { for (const client of clients) client.write(': heartbeat\n\n'); }, 20_000);
   heartbeat.unref();
   try {
-    await new Promise<void>((accept, reject) => { server.once('error', reject); server.listen(options.port ?? 4317, '127.0.0.1', () => {server.off('error', reject); accept();}); });
+    await new Promise<void>((accept, reject) => { server.once('error', reject); server.listen(options.port ?? 4317, options.containerListener ? '0.0.0.0' : '127.0.0.1', () => {server.off('error', reject); accept();}); });
   } catch (error) { clearInterval(heartbeat); await studio.close(); throw error; }
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('HTTP listener did not return a TCP address');
@@ -248,7 +350,7 @@ export async function startServer(options: StudioOptions & {port?: number; publi
     server, studio, url: `http://127.0.0.1:${address.port}`,
     close(): Promise<void> {
       return closePromise ??= (async () => {
-        closing = true; clearInterval(heartbeat); if (timer) clearTimeout(timer);
+        closing = true; shutdown.abort(); clearInterval(heartbeat); if (timer) clearTimeout(timer);
         for (const client of clients) client.end(); clients.clear();
         await new Promise<void>((accept, reject) => { server.close(error => error ? reject(error) : accept()); server.closeIdleConnections(); });
         await studio.close();
@@ -258,8 +360,8 @@ export async function startServer(options: StudioOptions & {port?: number; publi
 }
 
 async function main(): Promise<void> {
-  const {values} = parseArgs({options: {'port': {type: 'string'}, 'data-dir': {type: 'string'}, 'dsh-home': {type: 'string'}, help: {type: 'boolean'}}});
-  if (values.help) { console.log('Agent Studio Phase 3\n  --port 4317\n  --data-dir .studio\n  --dsh-home <existing DSH configuration directory>\n  STUDIO_MAX_WORKERS=4\n  STUDIO_DEMO_DELAY_MS=0\n  STUDIO_CONTAINER_IMAGE=<trusted local image digest> (enables offline containers)'); return; }
+  const {values} = parseArgs({options: {'port': {type: 'string'}, 'data-dir': {type: 'string'}, 'dsh-home': {type: 'string'}, 'container-listener': {type: 'boolean'}, help: {type: 'boolean'}}});
+  if (values.help) { console.log('Agent Studio Phase 3\n  --port 4317\n  --container-listener (publish the Docker port on host 127.0.0.1)\n  --data-dir .studio\n  --dsh-home <existing DSH configuration directory>\n  STUDIO_MAX_WORKERS=4\n  STUDIO_DEMO_DELAY_MS=0\n  STUDIO_CONTAINER_IMAGE=<trusted local image digest> (enables offline containers)'); return; }
   const port = Number(values.port ?? process.env.STUDIO_PORT ?? '4317');
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('port 必须是 0–65535 的整数');
   const dshHome = process.env.STUDIO_DEMO === '1' ? undefined : values['dsh-home'] ?? process.env.STUDIO_DSH_HOME ?? process.env.DSH_HOME;
@@ -287,7 +389,7 @@ async function main(): Promise<void> {
     memoryMb: integer('STUDIO_EXEC_MEMORY_MB', 256, 64, 4096),
     cpus: Number(process.env.STUDIO_EXEC_CPUS ?? 1),
     pidsLimit: integer('STUDIO_EXEC_PIDS', 64, 16, 512)} : {enabled: false};
-  const app = await startServer({...(process.env.STUDIO_VIDEO_INPUT_ROOT ? {videoInputRoot:resolve(process.env.STUDIO_VIDEO_INPUT_ROOT)} : {}), port, scheduler, demoDelayMs, execution, compaction, dataDir: resolve(values['data-dir'] ?? process.env.STUDIO_DATA_DIR ?? '.studio'), ...(dshHome ? {dshHome: resolve(dshHome)} : {})});
+  const app = await startServer({...(process.env.STUDIO_VIDEO_INPUT_ROOT ? {videoInputRoot:resolve(process.env.STUDIO_VIDEO_INPUT_ROOT)} : {}), containerListener: values['container-listener'], port, scheduler, demoDelayMs, execution, compaction, dataDir: resolve(values['data-dir'] ?? process.env.STUDIO_DATA_DIR ?? '.studio'), ...(dshHome ? {dshHome: resolve(dshHome)} : {})});
   console.log(`Agent Studio · Phase 3\nLocal: ${app.url}\nSQLite 三层记忆已启用；Worker ${image ? '使用本地隔离容器，外网关闭' : '使用无副作用探针（设置 STUDIO_CONTAINER_IMAGE 启用容器）'}。`);
   const stop = () => { void app.close().then(() => process.exit(0), () => process.exit(1)); };
   process.once('SIGINT', stop); process.once('SIGTERM', stop);

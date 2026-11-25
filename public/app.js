@@ -8,7 +8,13 @@ let csrfToken = '';
 let selectedRunId = null;
 let selectedAgentId = null;
 let selectedTemplateId = null;
+let newTemplate;
+let skillDirectory = [];
+let historyContext;
+const messageRequests = new Map();
 let draftVersion = null;
+let refreshingModels = false;
+let modelProbe;
 let toastTimer;
 let messageFingerprint = '';
 let sending = false;
@@ -101,7 +107,9 @@ function connection(connected, label) {
   $('connection').lastElementChild.textContent = label;
 }
 function applySnapshot(next) {
+  const updateModels = $('settingsDialog').open && JSON.stringify(snapshot?.models) !== JSON.stringify(next.models);
   snapshot = next;
+  if (updateModels) updateModelFields();
   if (!selectedRunId || !next.runs.some((run) => run.id === selectedRunId)) selectedRunId = next.runs[0]?.id || null;
   $('dshVersion').textContent = `DSH ${next.compatibility.dshVersion}`;
   $('dshVersion').title = next.compatibility.source || '独立插件原型';
@@ -161,9 +169,9 @@ function renderConversation() {
   $('runTitle').textContent = run?.title || '从一个清晰的目标开始';
   $('runMode').hidden = !run;
   $('runStatus').hidden = !run;
-  $('stopButton').hidden = !run || !run.tasks.some(task => ['queued', 'running', 'review'].includes(task.status));
-  $('messageText').disabled = !run || sending;
-  $('sendButton').disabled = !run || sending || !$('messageText').value.trim();
+  $('stopButton').hidden = !run || !run.tasks.some(task => ['queued', 'running', 'review', 'paused'].includes(task.status));
+  $('messageText').disabled = !run || run.status === 'stopped' || sending;
+  $('sendButton').disabled = !run || run.status === 'stopped' || sending || !$('messageText').value.trim();
   if (!run) return;
   $('runMode').textContent = modeNames[run.mode] || run.mode;
   $('runStatus').textContent = statusLabel(run.status);
@@ -368,13 +376,40 @@ function renderTasks() {
     }
     card.append(details);
     const actions = node('div', 'task-actions');
-    if (['failed', 'blocked'].includes(task.status)) {
+    const history = node('button','button secondary compact','任务历史');
+    history.type = 'button';
+    history.addEventListener('click', () => {
+      historyContext = {runId: run.id, taskId: task.id, offset: 0};
+      $('historyTitle').textContent = task.title;
+      $('historyEvents').replaceChildren();
+      $('historyDialog').showModal();
+      loadTaskHistory(historyContext);
+    });
+    actions.append(history);
+    if (task.parentTaskId) card.append(node('small','task-meta','父任务 · ' + (run.tasks.find(t => t.id === task.parentTaskId)?.title || task.parentTaskId)));
+    if (task.childTaskIds?.length) card.append(node('small','task-meta','子任务 · ' + task.childTaskIds.length));
+    if (['queued','running','review','paused'].includes(task.status)) {
+      const resume = task.status === 'paused' || task.pauseRequested;
+      const button = node('button','button secondary compact',resume ? '恢复' : '暂停');
+      button.type = 'button';
+      button.disabled = pendingTaskActions.has(task.id);
+      button.addEventListener('click', () => taskAction(run.id,task.id,resume ? 'resume' : 'pause'));
+      actions.append(button);
+    }
+    if (task.status === 'completed' && task.result) {
+      for (const [format,label] of [['docx','Word'],['md','Markdown']]) {
+        const link = node('a','button secondary compact','导出 ' + label);
+        link.href = '/api/runs/' + encodeURIComponent(run.id) + '/tasks/' + encodeURIComponent(task.id) + '/export?format=' + format;
+        actions.append(link);
+      }
+    }
+    if (run.status !== 'stopped' && ['failed', 'blocked'].includes(task.status)) {
       const retry = node('button', 'button secondary compact', '新建尝试并重试');
       retry.type = 'button'; retry.disabled = pendingTaskActions.has(task.id);
       retry.addEventListener('click', () => taskAction(run.id, task.id, 'retry'));
       actions.append(retry);
     }
-    if (['queued', 'running', 'review', 'blocked', 'failed'].includes(task.status)) {
+    if (['queued', 'running', 'review', 'paused', 'blocked', 'failed'].includes(task.status)) {
       const cancel = node('button', 'button compact danger', '取消此任务');
       cancel.type = 'button'; cancel.disabled = pendingTaskActions.has(task.id);
       cancel.addEventListener('click', () => taskAction(run.id, task.id, 'cancel'));
@@ -391,14 +426,36 @@ async function taskAction(runId, taskId, action) {
   try {
     await api(`/api/runs/${encodeURIComponent(runId)}/tasks/${encodeURIComponent(taskId)}/${action}`, {method: 'POST', body: '{}'});
     setError('globalError', '');
-    toast(action === 'retry' ? '新的执行尝试已进入队列' : '已取消此任务，其他任务继续执行');
+    toast({retry:'新的执行尝试已进入队列',pause:'已请求暂停',resume:'已请求恢复',cancel:'已取消此任务'}[action]);
     applySnapshot(await api('/api/state'));
   } catch (error) { setError('globalError', `操作失败：${error.message}`); }
   finally { pendingTaskActions.delete(taskId); renderTasks(); }
 }
+async function loadTaskHistory(context) {
+  $('moreHistory').hidden = true;
+  try {
+    const page = await api('/api/runs/' + encodeURIComponent(context.runId) + '/tasks/' + encodeURIComponent(context.taskId) + '/history?offset=' + context.offset);
+    if (historyContext !== context || !$('historyDialog').open) return;
+    if (!page.events.length && !context.offset) $('historyEvents').append(node('p','muted','尚无投递事件'));
+    for (const event of page.events) {
+      const entry = node('article','attempt-record');
+      entry.append(node('strong','',event.agent + ' · ' + event.kind),node('small','',dateLabel(event.at,true)),node('pre','reader-content',event.text));
+      $('historyEvents').append(entry);
+    }
+    context.offset = page.nextOffset;
+    $('moreHistory').hidden = context.offset === undefined;
+  } catch (error) {
+    if (historyContext === context) {
+      $('historyEvents').append(node('p','task-error',error.message));
+      $('moreHistory').hidden = false;
+    }
+  }
+}
+$('historyDialog').addEventListener('close', () => { historyContext = undefined; });
+$('moreHistory').addEventListener('click', () => { if (historyContext) loadTaskHistory(historyContext); });
 function openAppendTask() {
   const run = currentRun();
-  if (!run) return;
+  if (!run || run.status === 'stopped') return;
   appendRunId = run.id;
   const draft = appendDraft(run.id);
   $('appendTaskPrompt').value = draft?.prompt || '';
@@ -417,13 +474,13 @@ function openAppendTask() {
 function renderCapabilities() {
   const docker = snapshot.capabilities.execution === 'docker' && snapshot.capabilities.containers === 'enabled';
   const memory = snapshot.capabilities.memory === 'sqlite-three-layer';
-  $('capabilityNotice').textContent = `Phase 3 · ${memory ? '三层记忆按需读取' : '记忆未启用'} · ${docker ? 'Worker 在本机容器执行，网络关闭' : '容器未启用，Worker 仅运行无副作用探针'}。追加任务不会打断当前执行。`;
+  $('capabilityNotice').textContent = `${memory ? '三层记忆按需读取' : '记忆未启用'} · ${docker ? 'Worker 在本机容器执行，网络关闭' : '未启用容器执行'}。追加任务不会打断当前执行。`;
   $('memoryCapability').textContent = memory ? '已启用' : '未启用';
   $('memoryCapability').classList.toggle('scope-current', memory);
   $('executionCapability').textContent = docker ? '已启用' : '未启用 · 探针';
   $('executionCapability').classList.toggle('scope-current', docker);
   $('networkCapability').textContent = docker ? 'network none' : '未启用';
-  $('newRunExecutionNote').textContent = docker ? 'Worker 可在本机容器中执行代码与文件操作；容器网络关闭，工具安装尚未启用。' : '本次服务未启用容器，Worker 仅执行无副作用探针。';
+  $('newRunExecutionNote').textContent = docker ? 'Worker 可在本机容器中执行代码与文件操作；容器网络关闭，工具安装尚未启用。' : '本次服务未启用容器。获准联网的 Worker 可以调用公开搜索和读取工具。';
   $('memoriesTab').disabled = !memory;
   for (const example of document.querySelectorAll('.example')) {
     example.dataset.prompt = example.dataset.mode === 'direct'
@@ -626,35 +683,89 @@ function populateEfforts(preferred) {
   $('templateEffort').value = efforts.some((effort) => effort.id === preferred) ? preferred : '';
   $('modelNote').textContent = !model ? '当前模板的模型未在 DSH 中配置，请选择可用模型后保存。' : model.demo ? '演示模型用于验证协作流程，不发起真实模型请求。' : efforts.length ? '推理等级来自该模型在 DSH 中声明的能力。' : '该模型未提供可选推理等级，使用模型默认行为。';
 }
-function selectTemplate(id) {
-  const template = snapshot.templates.find((item) => item.id === id);
-  if (!template) return;
-  selectedTemplateId = template.id;
-  draftVersion = template.version;
-  renderTemplateList();
-  $('templateRole').textContent = roleNames[template.role];
-  $('templateVersion').textContent = `版本 ${template.version}`;
-  $('templateName').value = template.name;
-  $('templatePrompt').value = template.systemPrompt;
+function populateModels(selection) {
   const modelOptions = snapshot.models.map((model) => {
     const option = node('option', '', `${model.demo ? '[DEMO] ' : ''}${model.name} · ${model.provider}`);
     option.value = modelValue(model);
     return option;
   });
-  if (!snapshot.models.some((model) => modelValue(model) === modelValue(template.selection))) {
-    const missing = node('option', '', `不可用：${template.selection.provider} / ${template.selection.model}`);
-    missing.value = modelValue(template.selection);
+  if (!snapshot.models.some((model) => modelValue(model) === modelValue(selection))) {
+    const label = selection.provider === 'studio-demo' ? '原配置为离线演示，请选择 DSH 模型' : `不可用：${selection.provider} / ${selection.model}`;
+    const missing = node('option', '', label);
+    missing.value = modelValue(selection);
     missing.disabled = true;
     modelOptions.unshift(missing);
   }
   $('templateModel').replaceChildren(...modelOptions);
-  $('templateModel').value = modelValue(template.selection);
-  populateEfforts(template.selection.reasoningEffort);
+  $('templateModel').value = modelValue(selection);
+  populateEfforts(selection.reasoningEffort);
+  updateModelButtons();
+}
+function updateModelFields() {
+  const value = $('templateModel').value;
+  if (!value) return;
+  const [provider, model] = JSON.parse(value);
+  clearModelProbe();
+  populateModels({provider, model, reasoningEffort: $('templateEffort').value});
+}
+function updateModelButtons() {
+  $('refreshModels').disabled = refreshingModels || snapshot.capabilities.modelSource !== 'dsh';
+  $('probeModel').disabled = refreshingModels || !!modelProbe || !selectedModel() || selectedModel().demo;
+}
+function clearModelProbe() {
+  modelProbe?.abort();
+  modelProbe = undefined;
+  $('modelStatus').textContent = '';
+  updateModelButtons();
+}
+function choices(id, entries, selected) {
+  $(id).replaceChildren(...entries.map(entry => {
+    const label = node('label','choice');
+    const check = node('input');
+    check.type = 'checkbox';
+    check.value = entry.id;
+    check.checked = selected.includes(entry.id);
+    label.append(check, document.createTextNode(' ' + entry.name));
+    return label;
+  }));
+}
+const checked = id => [...$(id).querySelectorAll('input:checked')].map(input => input.value);
+function selectTemplate(id) {
+  if (newTemplate?.id !== id) newTemplate = undefined;
+  const template = newTemplate ?? snapshot.templates.find((item) => item.id === id);
+  if (!template) return;
+  selectedTemplateId = template.id;
+  draftVersion = template.version;
+  renderTemplateList();
+  $('templateRole').textContent = roleNames[template.role];
+  $('templateVersion').textContent = template.version ? `版本 ${template.version}` : '新模板';
+  $('templateName').value = template.name;
+  $('templatePrompt').value = template.systemPrompt;
+  $('cloneTemplate').disabled = !template.version;
+  $('delegateGroup').hidden = template.role === 'worker';
+  $('customDelegates').checked = Array.isArray(template.delegateIds);
+  $('delegateChoices').hidden = !$('customDelegates').checked;
+  choices('delegateChoices',snapshot.templates.filter(t => t.role === 'worker' || (template.role === 'orchestrator' && t.role === 'manager')),template.delegateIds || []);
+  choices('skillChoices',skillDirectory,template.skillIds || []);
+  $('workerNetwork').hidden = template.role !== 'worker';
+  $('templatePublicNetwork').checked = template.publicNetwork === true;
+  clearModelProbe();
+  populateModels(template.selection);
   setError('templateError', '');
   $('templateSaveState').textContent = '';
 }
-function openSettings() {
+$('customDelegates').addEventListener('change', () => { $('delegateChoices').hidden = !$('customDelegates').checked; });
+$('cloneTemplate').addEventListener('click', () => {
+  const source = snapshot.templates.find(t => t.id === selectedTemplateId);
+  if (!source) return;
+  newTemplate = {...source, id:crypto.randomUUID(), version:undefined, name:source.name + ' 副本', publicNetwork:false};
+  selectTemplate(newTemplate.id);
+  $('templateName').select();
+});
+async function openSettings() {
   if (!snapshot) return;
+  try { skillDirectory = await api('/api/skills'); }
+  catch (error) { setError('globalError',error.message); return; }
   selectTemplate(selectedTemplateId || snapshot.templates[0]?.id);
   $('settingsDialog').showModal();
 }
@@ -682,6 +793,9 @@ $('appendTaskForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (appending || !appendRunId) return;
   const runId = appendRunId;
+  if (snapshot.runs.find(run => run.id === runId)?.status === 'stopped') {
+    setError('appendTaskError','此协作已停止，请新建协作。'); return;
+  }
   const prompt = $('appendTaskPrompt').value.trim();
   const targetManagerId = $('appendTaskManager').value;
   if (!prompt) return;
@@ -709,10 +823,43 @@ $('appendTaskForm').addEventListener('submit', async (event) => {
 });
 document.querySelectorAll('.example').forEach((button) => button.addEventListener('click', () => openNewRun(button.dataset.prompt, button.dataset.mode)));
 document.querySelectorAll('.close-dialog').forEach((button) => button.addEventListener('click', () => button.closest('dialog').close()));
-$('templateModel').addEventListener('change', () => { populateEfforts(); $('templateSaveState').textContent = ''; });
+$('refreshModels').addEventListener('click', async () => {
+  refreshingModels = true;
+  clearModelProbe();
+  $('modelStatus').textContent = '正在读取 DSH 配置…';
+  try {
+    const models = await api('/api/models/refresh', {method: 'POST'});
+    snapshot.models = models;
+    updateModelFields();
+    $('modelStatus').textContent = `已更新，可用的 DSH 模型共 ${snapshot.models.filter(model => !model.demo).length} 个。`;
+  } catch (error) { $('modelStatus').textContent = error.message; }
+  finally { refreshingModels = false; updateModelButtons(); }
+});
+$('probeModel').addEventListener('click', async () => {
+  const model = selectedModel();
+  if (!model || model.demo || modelProbe) return;
+  const controller = new AbortController();
+  modelProbe = controller;
+  updateModelButtons();
+  $('modelStatus').textContent = '正在等待模型响应…';
+  try {
+    const reasoningEffort = $('templateEffort').value;
+    const result = await api('/api/models/probe', {method: 'POST', signal: controller.signal, body: JSON.stringify({
+      provider: model.provider, model: model.model, ...(reasoningEffort ? {reasoningEffort} : {}),
+    })});
+    if (!controller.signal.aborted) $('modelStatus').textContent = result.message;
+  } catch (error) {
+    if (!controller.signal.aborted) $('modelStatus').textContent = error.message;
+  } finally {
+    if (modelProbe === controller) { modelProbe = undefined; updateModelButtons(); }
+  }
+});
+$('settingsDialog').addEventListener('close', clearModelProbe);
+$('templateEffort').addEventListener('change', clearModelProbe);
+$('templateModel').addEventListener('change', () => { clearModelProbe(); populateEfforts(); $('templateSaveState').textContent = ''; });
 $('templateForm').addEventListener('input', () => { $('templateSaveState').textContent = '有未保存的修改'; });
 $('messageText').addEventListener('input', () => {
-  $('sendButton').disabled = !currentRun() || sending || !$('messageText').value.trim();
+  $('sendButton').disabled = !currentRun() || currentRun().status === 'stopped' || sending || !$('messageText').value.trim();
   $('messageText').style.height = 'auto';
   $('messageText').style.height = `${Math.min($('messageText').scrollHeight, 180)}px`;
 });
@@ -756,11 +903,17 @@ $('messageForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   const run = currentRun();
   const text = $('messageText').value.trim();
-  if (!run || !text || sending) return;
+  if (!run || run.status === 'stopped' || !text || sending) return;
   sending = true;
   renderConversation();
   try {
-    await api(`/api/runs/${encodeURIComponent(run.id)}/messages`, { method: 'POST', body: JSON.stringify({ text }) });
+    let pending = messageRequests.get(run.id);
+    if (pending?.text !== text) {
+      pending = {text, requestId: crypto.randomUUID()};
+      messageRequests.set(run.id,pending);
+    }
+    await api(`/api/runs/${encodeURIComponent(run.id)}/messages`, {method:'POST',body:JSON.stringify(pending)});
+    messageRequests.delete(run.id);
     if (selectedRunId === run.id) { $('messageText').value = ''; $('messageText').style.height = 'auto'; }
     setError('globalError', '');
     applySnapshot(await api('/api/state'));
@@ -781,13 +934,15 @@ $('stopButton').addEventListener('click', async () => {
 $('templateForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (saving) return;
-  const template = snapshot.templates.find((item) => item.id === selectedTemplateId);
+  const template = newTemplate ?? snapshot.templates.find((item) => item.id === selectedTemplateId);
   const model = selectedModel();
   if (!template || !model) { setError('templateError', '请选择当前可用的模型。'); return; }
   const selection = { provider: model.provider, model: model.model };
   if (model.efforts.length && $('templateEffort').value) selection.reasoningEffort = $('templateEffort').value;
-  const input = { id: template.id, name: $('templateName').value.trim(), role: template.role, systemPrompt: $('templatePrompt').value.trim(), selection, version: draftVersion };
-  if (!input.name || !input.systemPrompt) { setError('templateError', '模板名称和 System Prompt 不能为空。'); return; }
+  const input = { ...(template.role === 'worker' ? {publicNetwork: $('templatePublicNetwork').checked} : {}), id: template.id, name: $('templateName').value.trim(), role: template.role, systemPrompt: $('templatePrompt').value.trim(), selection, version: draftVersion };
+  input.skillIds = checked('skillChoices');
+  if (template.role !== 'worker') input.delegateIds = $('customDelegates').checked ? checked('delegateChoices') : null;
+  if (!input.name) { setError('templateError', '请输入模板名称。'); return; }
   saving = true;
   $('saveTemplateButton').disabled = true;
   $('saveTemplateButton').textContent = '保存中…';
@@ -795,6 +950,7 @@ $('templateForm').addEventListener('submit', async (event) => {
   try {
     const saved = await api(`/api/templates/${encodeURIComponent(template.id)}`, { method: 'PUT', body: JSON.stringify(input) });
     applySnapshot(await api('/api/state'));
+    newTemplate = undefined;
     selectTemplate(saved.id || template.id);
     $('templateSaveState').textContent = `已保存版本 ${saved.version ?? draftVersion}，新建 Agent 时生效`;
     toast('模板配置已保存');

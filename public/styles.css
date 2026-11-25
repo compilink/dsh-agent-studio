@@ -1796,3 +1796,26 @@ textarea.field {
 .video-review-page video {display:block;max-width:100%;max-height:560px;background:#101616;margin:16px 0;}
 .video-review-page pre {overflow:auto;max-height:320px;padding:16px;background:var(--canvas);}
 .video-review-page p {overflow-wrap:anywhere;line-height:1.6;}
+
+.model-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+#modelStatus:empty {
+  display: none;
+}
+
+body.network-page { display: block; overflow: auto; }
+.network-page main { max-width: 60rem; margin: 2rem auto; padding: 1.5rem; }
+.network-page form { display: grid; gap: .75rem; }
+.network-page fieldset { border: 1px solid #d9dedb; padding: 1rem; }
+.network-page #sources { display: flex; flex-wrap: wrap; gap: 1rem; }
+.network-page #calls li { margin-block: .75rem; overflow-wrap: anywhere; }
+#workerNetwork a { margin-inline-start: .75rem; }
+
+.template-form fieldset { margin: .5rem 0; min-width: 0; border: 1px solid var(--line, #d9dfdb); border-radius: 8px; padding: .65rem; }
+.choice { display: inline-flex; align-items: center; gap: .3rem; margin-right: .8rem; }
+.history-events { overflow: auto; max-height: 60vh; }
+.history-events pre { white-space: pre-wrap; overflow-wrap: anywhere; }

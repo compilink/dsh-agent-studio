@@ -8,7 +8,7 @@ import type { ModelOption } from './types.js';
 export const DEMO_MODELS: ModelOption[] = ['planner', 'coordinator', 'executor'].map(model => ({ provider: 'studio-demo', model, name: `演示 ${model}（离线脚本）`, efforts: ['low', 'medium', 'high'].map(id => ({ id, name: id })), demo: true }));
 function textChunks(value: string): StreamChunk[] { return [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'text-delta', index: 0, text: value }, { type: 'block-end', index: 0, block: { type: 'text', text: value } }, { type: 'usage', usage: { inputTokens: 1, outputTokens: value.length } }, { type: 'finish', reason: { kind: 'stop' } }]; }
 function toolChunks(name: string, args: object): StreamChunk[] { const id = CallId(randomUUID()); const json = JSON.stringify(args); return [{ type: 'block-start', index: 0, blockType: 'tool-call' }, { type: 'tool-call-delta', index: 0, id, name, argumentsDelta: json }, { type: 'block-end', index: 0, block: { type: 'tool-call', id, name, arguments: json } }, { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } }, { type: 'finish', reason: { kind: 'tool-calls' } }]; }
-interface Envelope { kind: string; taskId?: string; attemptId?: string; text: string; targetManagerId?: string; report?: {summary?: string; evidence?: string[]}; execution?: 'docker' | 'probe-only'; memory?: {checkpoint?: {id: string; version: number}}; memorySources?: {agentId: string; role: string; templateId: string}[] }
+interface Envelope { children?: {id:string; title:string}[]; delegates?: {id:string;role:string}[]; kind: string; taskId?: string; attemptId?: string; text: string; targetManagerId?: string; report?: {summary?: string; evidence?: string[]}; execution?: 'docker' | 'probe-only'; memory?: {checkpoint?: {id: string; version: number}}; memorySources?: {agentId: string; role: string; templateId: string}[] }
 
 /** Finite tool decisions over the latest durable delivery and actual DSH tool history. */
 export class DemoAdapter extends LlmAdapter {
@@ -45,6 +45,15 @@ export class DemoAdapter extends LlmAdapter {
     let chunks: StreamChunk[];
     if (envelope.kind === 'message') chunks = textChunks('【离线演示】已收到会话补充。正在执行的任务保持不变；新增独立工作请使用“追加任务”。');
     else if (envelope.kind === 'result') chunks = textChunks(`【演示协调器】任务 ${envelope.taskId?.slice(0, 8)} 已验收。${envelope.text}\n${envelope.execution === 'docker' ? '执行工具使用本地隔离容器，产物保留在该 Attempt 工作区。' : '本次执行能力为无副作用探针。'}追加任务不会打断其他执行。`);
+    else if (envelope.kind === 'review' && envelope.children?.length) {
+      const unread = envelope.children.find(child => !calls.some(call => call.name === 'studio_child_result' && (JSON.parse(call.arguments) as {childId:string}).childId === child.id));
+      if (unread) chunks = toolChunks('studio_child_result', {taskId:envelope.taskId, childId:unread.id});
+      else {
+        const reports = results.filter(item => calls.some(call => call.name === 'studio_child_result' && call.id === item.toolCallId))
+          .map(item => item.content.filter(block => block.type === 'text').map(block => (JSON.parse(block.text) as {content:string}).content).join(''));
+        chunks = toolChunks('studio_accept', {taskId:envelope.taskId, text:reports.join('\n')});
+      }
+    }
     else if (envelope.kind === 'review') chunks = toolChunks('studio_accept', { taskId: envelope.taskId, text: `验收 Worker 报告：${envelope.report?.summary ?? envelope.text}` });
     else if (envelope.kind !== 'task') chunks = textChunks('');
     else if (role === 'worker') {
@@ -72,8 +81,14 @@ export class DemoAdapter extends LlmAdapter {
       else chunks = toolChunks('studio_report', {...scope, text: docker ? `Worker 已在隔离容器中运行 node studio-demo.mjs，并读取实际产物 result.json：${String(result('studio_file_read')?.content).slice(0, 1800)}` : `Worker 已完成任务 ${envelope.taskId?.slice(0, 8)} 的无副作用探针：${envelope.text.slice(0, 200)}。模型 ${options.model}，推理等级 ${options.reasoningEffort ?? '默认'}。`, evidence: docker ? [`workspace:${envelope.attemptId}:result.json`] : [`studio_probe:${envelope.attemptId}`]});
     } else {
       const manager = role === 'orchestrator' && (envelope.targetManagerId || mode === 'hierarchical' || (mode === 'auto' && (envelope.text.length >= 80 || /复杂|多个|拆分|parallel/i.test(envelope.text))));
+      const lines = envelope.text.split('\n').map(line => line.trim()).filter(Boolean);
+      const target = envelope.delegates?.find(t => t.role === (manager ? 'manager' : 'worker')) ?? envelope.delegates?.[0];
+      if (/^(?:并行拆分|parallel tasks)[:：]?$/i.test(lines[0] ?? '') && lines.length > 2 && lines.length <= 9 && target && !envelope.targetManagerId) {
+        yield* toolChunks('studio_split', {taskId:envelope.taskId, branches:lines.slice(1).map(prompt => ({templateId:target.id,prompt}))});
+        return;
+      }
       const source = envelope.memorySources?.find(candidate => candidate.role === (manager ? 'manager' : 'worker'));
-      chunks = toolChunks('studio_delegate', { taskId: envelope.taskId, role: manager ? 'manager' : 'worker', prompt: envelope.text.slice(0, 8000), ...(envelope.targetManagerId && manager ? { agentId: envelope.targetManagerId } : source ? {memorySourceAgentId: source.agentId, templateId: source.templateId} : {}) });
+      chunks = toolChunks('studio_delegate', { taskId: envelope.taskId, role: role === 'orchestrator' && envelope.targetManagerId ? 'manager' : target?.role ?? (manager ? 'manager' : 'worker'), prompt: envelope.text, ...(envelope.targetManagerId && manager ? { agentId: envelope.targetManagerId } : source ? {memorySourceAgentId: source.agentId, templateId: source.templateId} : {}) });
     }
     for (const chunk of chunks) { options.signal?.throwIfAborted(); yield chunk; }
   }

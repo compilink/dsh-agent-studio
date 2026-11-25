@@ -22,7 +22,8 @@ async function verifyPublicImports(dir) {
 }
 await verifyPublicImports(join(projectRoot, 'src'));
 const required = {
-  '@deepseek-ai/cordis': ['Context'],
+  '@deepseek-ai/cordis': ['Context', 'Service'],
+  '@deepseek-ai/dsh-launch-environment': ['DSH_LAUNCH_ENVIRONMENT_KEY', 'launchEnvironmentOf'],
   '@deepseek-ai/dsh-agent': ['default', 'installModelSelection'],
   '@deepseek-ai/dsh-agent-loop': ['default'],
   '@deepseek-ai/dsh-llm': ['default'],

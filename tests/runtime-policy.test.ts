@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -60,16 +61,66 @@ test('a data directory has one live runtime owner and can reopen after close', a
   await rm(dataDir, { recursive: true, force: true });
 });
 
-test('only an absent runtime owner process can be recovered', async () => {
-  const dataDir = await mkdtemp(join(tmpdir(), 'studio-stale-owner-'));
-  const store = new StudioStore(dataDir);
-  store.close();
-  const db = new DatabaseSync(join(dataDir, 'studio.sqlite'));
-  db.prepare('INSERT INTO runtime_owner VALUES(1,?,?)').run(2147483647, 'dead-owner');
-  db.close();
-  const recovered = new StudioStore(dataDir);
-  recovered.close();
-  await rm(dataDir, { recursive: true, force: true });
+test('separate processes cannot share a data directory and SIGKILL releases its SQLite lock', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'studio-crashed-owner-'));
+  const child = (script: string) => spawnSync(process.execPath, ['--input-type=module', '-e',
+    `const {StudioStore} = await import(process.argv[1]); const store = new StudioStore(process.argv[2]); ${script}`,
+    new URL('../src/store.js', import.meta.url).href, dataDir], {encoding: 'utf8', timeout: 5_000});
+  const owner = new StudioStore(dataDir);
+  try {
+    const competing = child('store.close()');
+    assert.equal(competing.status, 1);
+    assert.match(competing.stderr, /already owned/);
+    owner.close();
+    const crashed = child("store.db.exec('CREATE TABLE committed_before_crash(id INTEGER)'); process.kill(process.pid, 'SIGKILL')");
+    assert.equal(crashed.signal, 'SIGKILL', crashed.stderr);
+    const recovered = new StudioStore(dataDir);
+    try {
+      assert.ok(recovered.db.prepare("SELECT name FROM sqlite_master WHERE name='committed_before_crash'").get());
+      assert.equal(recovered.db.prepare('SELECT pid FROM runtime_owner').get()?.pid, 1);
+      assert.throws(() => new StudioStore(dataDir), /already owned/);
+    } finally { recovered.close(); }
+  } finally { owner.close(); await rm(dataDir, {recursive: true, force: true}); }
+});
+
+test('an external lock directory fences other lock domains through a shared data mount and survives a crash', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'studio-domain-data-'));
+  const domainDir = await mkdtemp(join(tmpdir(), 'studio-domain-lock-'));
+  const otherDomain = await mkdtemp(join(tmpdir(), 'studio-other-lock-'));
+  const inDomain = (lockDir: string, script: string) => spawnSync(process.execPath, ['--input-type=module', '-e',
+    `const {StudioStore} = await import(process.argv[1]); const store = new StudioStore(process.argv[2]); ${script}`,
+    new URL('../src/store.js', import.meta.url).href, dataDir], {
+    env: {...process.env, STUDIO_RUNTIME_LOCK_DIR: lockDir}, encoding: 'utf8', timeout: 5_000});
+  try {
+    const crashed = inDomain(domainDir, "store.db.exec('CREATE TABLE domain_check(value INTEGER)'); process.kill(process.pid, 'SIGKILL')");
+    assert.equal(crashed.signal, 'SIGKILL', crashed.stderr);
+    const refused = inDomain(otherDomain, 'store.close()');
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /different runtime lock directory/);
+    assert.throws(() => new StudioStore(dataDir), /different runtime lock directory/);
+    const recovered = inDomain(domainDir, "store.db.prepare('SELECT * FROM domain_check').all(); store.close()");
+    assert.equal(recovered.status, 0, recovered.stderr);
+    const transferred = inDomain(otherDomain, 'store.close()');
+    assert.equal(transferred.status, 0, transferred.stderr);
+    new StudioStore(dataDir).close();
+  } finally {
+    await Promise.all([dataDir, domainDir, otherDomain].map(dir => rm(dir, {recursive: true, force: true})));
+  }
+});
+
+test('a legacy owner outside the current PID namespace cannot be mistaken for an abandoned directory', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'studio-legacy-owner-'));
+  try {
+    new StudioStore(dataDir).close();
+    const db = new DatabaseSync(join(dataDir, 'studio.sqlite'));
+    try {
+      db.prepare('INSERT INTO runtime_owner VALUES(1,?,?)').run(2147483647, 'legacy-owner');
+      assert.throws(() => new StudioStore(dataDir), /legacy runtime/);
+      assert.equal(db.prepare('SELECT nonce FROM runtime_owner').get()?.nonce, 'legacy-owner');
+      db.exec('DELETE FROM runtime_owner');
+    } finally { db.close(); }
+    new StudioStore(dataDir).close();
+  } finally { await rm(dataDir, {recursive: true, force: true}); }
 });
 
 test('unknown database versions are rejected without rewriting their version', async () => {

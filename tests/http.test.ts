@@ -13,7 +13,7 @@ test('only the root conversation endpoint accepts messages and writes require a 
     assert.equal(homepage.status, 200);
     assert.match(homepage.headers.get('content-security-policy')!, /frame-ancestors 'none'/);
     const {csrfToken} = await (await fetch(`${app.url}/api/bootstrap`)).json() as {csrfToken: string};
-    const payload = JSON.stringify({prompt: '无副作用探针', mode: 'direct'});
+    const payload = JSON.stringify({prompt: '无副作用探针' + 'x'.repeat(8001), mode: 'direct'});
     const noToken = await fetch(`${app.url}/api/runs`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: payload});
     assert.equal(noToken.status, 403);
     const headers = {'Content-Type': 'application/json', 'X-Studio-CSRF': csrfToken};
@@ -21,8 +21,8 @@ test('only the root conversation endpoint accepts messages and writes require a 
     assert.equal(crossOrigin.status, 403);
     const invalidMode = await fetch(`${app.url}/api/runs`, {method: 'POST', headers, body: JSON.stringify({prompt: 'test', mode: 'invalid'})});
     assert.equal(invalidMode.status, 400);
-    const oversizedTask = await fetch(`${app.url}/api/runs`, {method: 'POST', headers, body: JSON.stringify({prompt: 'x'.repeat(8001), mode: 'direct'})});
-    assert.equal(oversizedTask.status, 400);
+    const blankTask = await fetch(`${app.url}/api/runs`, {method: 'POST', headers, body: JSON.stringify({prompt: '   ', mode: 'direct'})});
+    assert.equal(blankTask.status, 400);
     const created = await fetch(`${app.url}/api/runs`, {method: 'POST', headers, body: payload});
     assert.equal(created.status, 201);
     const run = await created.json() as {id: string};

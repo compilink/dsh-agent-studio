@@ -1954,7 +1954,7 @@
       "name": "@deepseek-ai/dsh-launch-environment",
       "version": "0.1.1-rc.2",
       "path": "packages/util/launch-environment",
-      "direct": false,
+      "direct": true,
       "entry": "./lib/index.js",
       "entrySha256": "b1c54dba56ffb8327b8d7e5f3408fe986152741e80eee37b182ca69ba8f2537e",
       "manifestSha256": "e1cef2a5071acd54ec89b8e78877bbc5ccc6fb9424977459b4b6edd1a2fb50a3",

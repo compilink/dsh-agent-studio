@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>任务流程 · Agent Studio</title>
+  <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/workflows.css">
+  <script type="module" src="/workflows.js"></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/">Agent Studio</a><a href="/">返回协作工作台</a></header>
+  <main class="flows">
+    <h1>任务流程</h1>
+    <p id="message" role="status"></p>
+    <section>
+      <header><h2>流程模板</h2><button id="new" type="button">新建模板</button></header>
+      <div class="row"><label>选择模板<select id="templates"></select></label><label>历史版本<select id="history"></select></label><button id="restore">恢复为草稿</button><button id="retire">停用模板</button></div>
+      <div class="row"><label>模板名称<input id="name" required maxlength="120"></label></div>
+      <div class="row tools"><button id="add">添加节点</button><button id="publish">发布版本</button><button id="reload">重新载入</button><span id="draft-state"></span></div>
+      <div id="node-menu" role="menu" hidden><button id="configure-node" role="menuitem">节点设置</button><button id="delete-node" role="menuitem">删除节点</button></div>
+      <div class="board"><div id="surface" aria-label="节点图"></div></div>
+      <p class="help">在空白处右键添加节点，右键点击节点可设置或删除。拖动节点可调整位置。从节点右侧的连接点拖到目标节点即可连线，也可在节点设置中勾选上游。</p>
+      <fieldset id="editor" disabled><legend>节点设置</legend>
+        <label>节点名称<input id="node-name" maxlength="120"></label><label>执行 Agent<select id="node-agent"></select></label><label>执行指令<textarea id="instruction" rows="3"></textarea></label>
+        <label>输入检查规则（可选）<textarea id="input-rule" rows="2"></textarea></label>
+        <label>输出检查规则（可选）<textarea id="output-rule" rows="2"></textarea></label>
+        <label class="check"><input id="review" type="checkbox">完成后人工审核</label>
+        <div id="parents"></div><button id="remove" type="button">删除节点</button>
+      </fieldset>
+    </section>
+    <section>
+      <header><h2>流程执行</h2><button id="refresh">刷新进度</button></header>
+      <div class="row"><label>协作<select id="runs"></select></label><label>模板版本<select id="versions"></select></label><button id="start">启动此版本</button></div>
+      <fieldset id="attachments" hidden><legend>本次执行的输入文件</legend>
+        <label>接收附件的节点<select id="input-node"></select></label>
+        <label id="drop-files">选择或拖入 UTF-8 文本文件<input id="input-files" type="file" multiple></label>
+        <ul id="input-list"></ul>
+      </fieldset>
+      <div id="instances"></div>
+    </section>
+  </main>
+</body>
+</html>

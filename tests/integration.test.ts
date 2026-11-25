@@ -84,7 +84,7 @@ test('DSH configuration snapshots survive restart; new tasks and Runs select new
     assert.ok(direct.agents.find(a => a.role === 'worker')!.systemPrompt.includes('V2'));
     const current = await studio.snapshot();
     assert.equal(current.templates.find(t => t.role === 'worker')!.memoryIdentityId, changedWorker.memoryIdentityId);
-    assert.deepEqual(current.capabilities, {execution: 'probe-only', memory: 'sqlite-three-layer', containers: 'disabled', trustedTools: 'planned', tasks: 'durable', scheduling: 'non-preemptive'});
+    assert.deepEqual(current.capabilities, {modelSource:'demo', execution: 'probe-only', memory: 'sqlite-three-layer', containers: 'disabled', trustedTools: 'planned', tasks: 'durable', scheduling: 'non-preemptive'});
     await studio.close(); studio = undefined;
     const resumedHeaders = (await logs(join(dataDir, 'sessions'))).filter(event => event.type === 'request/header').map(event => event.data?.header as {config: Record<string, unknown>});
     assert.ok(resumedHeaders.length > headers.length);

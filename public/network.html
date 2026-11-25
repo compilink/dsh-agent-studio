@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>公开网络 · DSH Agent Studio</title><link rel="stylesheet" href="/styles.css"><script src="/network.js" defer></script></head>
+<body class="network-page"><main>
+<a href="/">返回 Agent Studio</a>
+<h1>公开网络</h1>
+<form id="searchSettings"><fieldset><legend>搜索来源</legend><p>每次搜索会向所选来源发送关键词。公开网络权限在 Worker 模板中设置。</p><div id="sources"></div></fieldset>
+<label for="endpoint">SearXNG 搜索地址</label><input class="field" id="endpoint" type="url" placeholder="https://search.example.org/search"><p id="hint" class="field-note"></p>
+<button class="button primary" id="save" disabled>保存搜索设置</button> <button class="button secondary" id="reload" type="button">重新载入</button></form>
+<p id="status" role="status"></p><h2>最近 50 次访问</h2><ol id="calls"></ol>
+</main></body></html>
