@@ -1,9 +1,12 @@
 import {readFile,writeFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
+import { actionField, localSettings } from './settings.mjs';
 import {runLocalAgent} from './local-agent.mjs';
 const task=JSON.parse(await readFile(process.argv[2],'utf8')),candidateRun=JSON.parse(await readFile(process.argv[3],'utf8')),model=process.argv[4],out=process.argv[5];
 const answer=JSON.parse(candidateRun.result),card=answer.candidates[0];
-const fields=['title','hook','retention','next_action','verification_plan'];
+const configured=actionField(localSettings());
+const action=Object.hasOwn(card,configured)?configured:'next_action';
+const fields=['title','hook','retention',action,'verification_plan'];
 const claims=[...fields.map(k=>({id:k,text:card[k]})),...card.source_claims.map((c,i)=>({id:'claim_'+i,text:c.claim})),{id:'audience_question',text:card.audience_question.question}];
 const row={type:'object',required:['id','verdict','reason'],properties:{id:{enum:claims.map(c=>c.id)},verdict:{enum:['supported','unsupported','proposal_not_fact']},reason:{type:'string'}}};
 const schema={type:'object',required:['checks'],properties:{checks:{type:'array',minItems:claims.length,maxItems:claims.length,items:row}}};

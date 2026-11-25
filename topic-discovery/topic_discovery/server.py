@@ -1,11 +1,20 @@
-import json, time
+import html, json, time
 from pathlib import Path
 from http.server import HTTPServer,BaseHTTPRequestHandler
 from urllib.parse import urlsplit,parse_qs
 from .store import Store
+from .settings import local_settings
+
+def dashboard_page(page, settings):
+    title = html.escape(settings.get('dashboardTitle', '选题雷达'))
+    label = html.escape(settings.get('dashboardLabel', ''))
+    return (page.replace('<title>选题雷达</title>', f'<title>{title}</title>', 1)
+               .replace('<!-- dashboard-label -->', f'<small>{label}</small>' if label else '', 1))
+
 
 def serve(db_path,port=4332):
     dashboard=Path(__file__).resolve().parent.parent/'dashboard'
+    settings=local_settings()
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*args):pass
         def do_GET(self):
@@ -36,6 +45,8 @@ def serve(db_path,port=4332):
                     filename=p.path.removeprefix('/dashboard/').lstrip('/') or 'index.html';file=(dashboard/filename).resolve()
                     if dashboard.resolve() not in file.parents or not file.is_file():self.send_error(404);return
                     body=file.read_bytes();mime='text/html' if file.suffix=='.html' else 'text/javascript' if file.suffix in ('.js','.mjs') else 'text/css' if file.suffix=='.css' else 'application/octet-stream'
+                    if file == dashboard/'index.html':
+                        body=dashboard_page(body.decode('utf-8'),settings).encode('utf-8')
                     self.send_response(200);self.send_header('Content-Type',mime);self.send_header('X-Content-Type-Options','nosniff');self.end_headers();self.wfile.write(body);return
                 body=json.dumps(data,ensure_ascii=False).encode();self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body)
             except (KeyError,ValueError):self.send_error(404)

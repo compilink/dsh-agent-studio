@@ -7,9 +7,9 @@ import LlmRuntime,{LlmAdapter,freezeMessage,MessageId} from '@deepseek-ai/dsh-ll
 import SessionStore from '@deepseek-ai/dsh-session';
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import ToolRuntime from '@deepseek-ai/dsh-tools';
-import { localModelName } from './model-name.mjs';
+import { configuredModel, localSettings } from './settings.mjs';
 export async function runLocalAgent({model,system,prompt,schema,maxTokens=3000,timeoutMs=180000}){
- localModelName(model);
+ model=configuredModel(model, localSettings());
  if(!Number.isInteger(maxTokens)||maxTokens<1||maxTokens>6000)throw Error('Invalid local model/budget');
  if(JSON.stringify(prompt).length>45000)throw Error('Input budget exceeded');
  const tags=await fetch('http://127.0.0.1:11434/api/tags',{signal:AbortSignal.timeout(5000)}).then(r=>r.json());

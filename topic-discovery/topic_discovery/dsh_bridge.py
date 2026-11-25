@@ -4,6 +4,7 @@ import hashlib,json,re,html
 def rendered_text(text):
     return re.sub(r"\s+"," ",html.unescape(re.sub(r"<[^>]*>"," ",text))).strip()
 from .store import utcnow
+from .settings import action_field, local_settings
 
 def export_task(store,run_id):
     evidence=store.artifacts('track',run_id)
@@ -14,7 +15,7 @@ def export_task(store,run_id):
       'roles':['fact_verifier','topic_tracker','editor'],
       'budget':{'max_evidence':50,'max_candidates':5,'paid_fallback':False},
       'evidence':[{'artifact_id':a['artifact_id'],'data':a['data']} for a in evidence[:50]],
-      'expected_output':{'schema_version':'1.0','run_id':run_id,'candidates':[{'title':'string','evidence_ids':['supplied artifact id'],'hook':'why click','retention':'why keep watching','next_action':'specific task','verification_plan':'how to verify','uncertainties':['string'],'status':'needs_user_discussion'}]},
+      'expected_output':{'schema_version':'1.0','run_id':run_id,'candidates':[{'title':'string','evidence_ids':['supplied artifact id'],'hook':'why click','retention':'why keep watching',action_field(local_settings()):'specific task','verification_plan':'how to verify','uncertainties':['string'],'status':'needs_user_discussion'}]},
       'execution_status':'not_submitted','approval_gates':['topic_and_script','final_video']}
     from .evidence_checks import check_evidence_packet
     payload['evidence_hints']=check_evidence_packet(payload['evidence'])
@@ -24,11 +25,12 @@ def validate_response(payload,response):
     if response.get('schema_version')!='1.0' or response.get('run_id')!=payload['run_id']:raise ValueError('response_contract_mismatch')
     cards=response.get('candidates'); ids={e['artifact_id'] for e in payload['evidence']}
     if not isinstance(cards,list) or len(cards)>5:raise ValueError('invalid_candidate_count')
+    field=action_field(local_settings(), payload)
     for c in cards:
         if c.get('status')!='needs_user_discussion':raise ValueError('unauthorized_state')
         refs=c.get('evidence_ids')
         if not isinstance(refs,list) or not refs or not all(r in ids for r in refs):raise ValueError('unknown_evidence')
-        for k in ('title','hook','retention','next_action','verification_plan'):
+        for k in ('title','hook','retention',field,'verification_plan'):
             if not isinstance(c.get(k),str) or not c[k].strip():raise ValueError('missing_'+k)
         if any(c.get(k) for k in ('production_approved','publish_approved')):raise ValueError('unauthorized_approval')
     return cards

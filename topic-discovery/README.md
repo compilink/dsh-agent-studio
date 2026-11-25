@@ -28,6 +28,17 @@ python3 -m topic_discovery import-dsh --task data/task.json --result data/result
 
 运行编号来自导入或采集命令的输出。导出内容包括本轮的证据编号和原文。导回时校验来源、引用、任务编号和材料状态；通过的候选进入语义审核。含有独立公开问题和相应材料的任务还可使用 `dsh/analyze-structured.mjs` 生成结构化审阅。独立审核通过后可进入选题讨论，制作和发布仍需另外授权。
 
+## 本机选项
+
+可以在本目录的 `.local/settings.json` 保存选题工作台的本机设置，或用 `TOPIC_SETTINGS_FILE` 指定另一份 JSON 文件。Git 忽略 `.local/`。未提供设置时，审阅器使用显式指定的 `TOPIC_LOCAL_MODEL`，看板和候选格式使用公开默认值。
+
+| 配置项 | 用途 |
+| --- | --- |
+| `defaultModel`、`allowedModels` | 默认 Ollama 标签、允许使用的本机模型标签列表。环境变量 `TOPIC_LOCAL_MODEL` 优先于默认标签，选中的标签仍须在配置的列表中。 |
+| `actionField` | 候选的下一步行动字段，默认 `next_action`。已有安装可沿用以 `_action` 结尾的旧字段。 |
+| `analysisInstruction`、`structuredInstruction` | 普通和结构化分析器的本机写作指令，`{action}` 会替换为本次任务的行动字段。 |
+| `dashboardTitle`、`dashboardLabel`、`feedUserAgent` | 网页标题、标题上方的文字、订阅读取时发送的标识。 |
+
 ## 测试和数据
 
 ```sh

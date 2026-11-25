@@ -2,6 +2,7 @@ import hashlib, json, re, time
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 from .store import utcnow
+from .settings import action_field, local_settings
 from .stage_metrics import summarize, UNITS, ratio
 
 MODULES=['collect','normalize','deduplicate','resolve','verify','track','edit']
@@ -87,12 +88,14 @@ def run_pipeline(store, documents, now=None, mode='fixture', collection_stats=No
         store.save_topic(tid,dict(content_hash=x['content_hash'],history=history))
         return result,'completed',change
     tracked=stage('track',verified,track)
+    action_key=action_field(local_settings())
     def edit(x):
         if x['date_status']!='known':return None,'skipped','date_unverified'
         if not x['windows'] and x['change_status']!='changed_content_pending_review':return None,'skipped','outside_window_without_update'
         if x['change_status']=='no_change':return None,'skipped','already_observed_without_update'
         # Source text never controls execution, approvals or task instructions.
-        card=dict(title=x['title'],topic_id=x['topic_id'],source_url=x['url'],published_at=x['published_at'],windows=x['windows'],change_status=x['change_status'],status='needs_editorial_review',verification_status=x['verification_status'],hook=None,next_action=None,experiment=None,production_approved=False,publish_approved=False,mode=mode,generated_by='deterministic_stub',evidence_hash=x['content_hash'])
+        card=dict(title=x['title'],topic_id=x['topic_id'],source_url=x['url'],published_at=x['published_at'],windows=x['windows'],change_status=x['change_status'],status='needs_editorial_review',verification_status=x['verification_status'],hook=None,experiment=None,production_approved=False,publish_approved=False,mode=mode,generated_by='deterministic_stub',evidence_hash=x['content_hash'])
+        card[action_key]=None
         return card,'completed','draft_only_no_model_claim'
     cards=stage('edit',tracked,edit)
     for c in cards:store.artifact(rid,'candidate',c)

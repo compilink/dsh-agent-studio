@@ -37,3 +37,6 @@ backups/
 *.sqlite3
 *.sqlite3-*
 drama-blobs/
+
+# Machine-specific settings and unpublished material
+.local/

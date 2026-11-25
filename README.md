@@ -153,3 +153,5 @@ Attempt 结束后，可在任务详情点击「查看文件」，浏览目录并
 包提供标准 `dsh.bundle` 声明与 `cordis.patch.yml`。Bundle 启动自己的 DSH runtime 和 Web 服务，并在宿主插件卸载时关闭；它不共享宿主 profile 的 Agent registry 或会话。当前验证覆盖真实 Cordis 插件生命周期、npm tarball 解包与本地依赖启动；完整 `dsh plugin --profile ...` 安装流程需要另行验证。
 
 实现分工与后续阶段见 [架构说明](docs/architecture.md)。运行检查和视频试点的用法见[验证方法](docs/validation.md)与[视频制作流程](docs/video-production-pilot.md)。
+
+开发时请先[启用提交和推送前检查](docs/commit-checks.md)。
